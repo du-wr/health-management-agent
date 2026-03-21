@@ -1,0 +1,73 @@
+export type LabStatus = "high" | "low" | "normal" | "unknown";
+export type IntentName =
+  | "report_follow_up"
+  | "term_explanation"
+  | "symptom_rag_advice"
+  | "collect_more_info"
+  | "safety_handoff";
+export type TrustTier = "A" | "B" | "C";
+
+export interface LabItem {
+  name: string;
+  value_raw: string;
+  value_num?: number | null;
+  unit: string;
+  reference_range: string;
+  status: LabStatus;
+  clinical_note?: string | null;
+}
+
+export interface ReportParseResult {
+  report_id: string;
+  file_name: string;
+  items: LabItem[];
+  abnormal_items: LabItem[];
+  raw_text: string;
+  parse_warnings: string[];
+  parse_status: string;
+}
+
+export interface Citation {
+  source_type: string;
+  doc_id: string;
+  title: string;
+  url: string;
+  trust_tier: TrustTier;
+  snippet: string;
+}
+
+export interface AgentResponse {
+  session_id: string;
+  intent: IntentName;
+  answer: string;
+  citations: Citation[];
+  used_tools: string[];
+  follow_up_questions: string[];
+  safety_level: "safe" | "caution" | "handoff";
+  handoff_required: boolean;
+}
+
+export interface SummaryArtifact {
+  summary_id: string;
+  markdown: string;
+  pdf_path: string;
+  created_at: string;
+}
+
+export interface KnowledgeDoc {
+  doc_id: string;
+  title: string;
+  url: string;
+  source_domain: string;
+  source_org: string;
+  trust_tier: TrustTier;
+  content_type: string;
+  published_at?: string | null;
+  snippet: string;
+}
+
+export interface KnowledgeSourcesResponse {
+  total_docs: number;
+  trust_breakdown: Record<string, number>;
+  recent_docs: KnowledgeDoc[];
+}

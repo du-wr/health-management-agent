@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+node_modules/
+dist/
+.env
+.DS_Store
+data/sqlite/
+data/uploads/
+data/output/
+tmp/
+
