@@ -22,12 +22,12 @@ class Settings(BaseSettings):
         alias="QWEN_BASE_URL",
     )
     qwen_chat_model: str = Field(default="qwen3.5-plus", alias="QWEN_CHAT_MODEL")
+    qwen_fast_model: str = Field(default="qwen3.5-flash", alias="QWEN_FAST_MODEL")
+    qwen_max_model: str = Field(default="qwen3-max", alias="QWEN_MAX_MODEL")
     qwen_vl_model: str = Field(default="qwen3-vl-flash", alias="QWEN_VL_MODEL")
+    short_term_context_turns: int = Field(default=4, alias="SHORT_TERM_CONTEXT_TURNS")
     who_client_id: str = Field(default="", alias="WHO_CLIENT_ID")
     who_client_secret: str = Field(default="", alias="WHO_CLIENT_SECRET")
-    allow_knowledge_bootstrap: bool = Field(default=True, alias="ALLOW_KNOWLEDGE_BOOTSTRAP")
-    bing_search_base: str = Field(default="https://www.bing.com/search", alias="BING_SEARCH_BASE")
-    user_agent: str = Field(default="Mozilla/5.0", alias="USER_AGENT")
 
     @property
     def upload_path(self) -> Path:
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     def sqlite_path(self) -> Path:
         if self.database_url.startswith("sqlite:///"):
             return (BASE_DIR / self.database_url.removeprefix("sqlite:///")).resolve()
-        raise ValueError("Only sqlite database_url is supported in this v1 implementation.")
+        raise ValueError("Only sqlite database_url is supported in this project.")
 
 
 @lru_cache(maxsize=1)
@@ -51,4 +51,3 @@ def get_settings() -> Settings:
     (settings.output_path / "pdf").mkdir(parents=True, exist_ok=True)
     settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     return settings
-

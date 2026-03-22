@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.idea/
+*.egg-info/
+*.tsbuildinfo
 node_modules/
 dist/
 .env
@@ -11,4 +14,3 @@ data/sqlite/
 data/uploads/
 data/output/
 tmp/
-

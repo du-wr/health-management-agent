@@ -1,36 +1,38 @@
-# 体检报告解读与健康咨询 Agent
+# 体检报告解读与健康咨询 Agent Demo
 
-一个面向中国医疗语境的最小可演示产品，包含：
+这是一个面向中文场景的全栈演示项目，目标是做一个“能读体检报告、能回答健康相关问题、能导出健康小结”的 Demo。
 
-- 体检/检验报告上传与结构化解析
-- 自定义 ReAct 健康咨询 Agent
-- 联网抓取知识库初始化与受控引用
-- 健康小结 Markdown/PDF 导出
+项目重点不是做医疗诊断，而是演示一条相对完整的产品链路：
 
-## 目录
+- 用户上传体检报告
+- 后端解析报告并提取结构化指标
+- Agent 围绕报告、医学名词、本地知识库和 WHO ICD-11 做解释
+- 前端用流式方式展示回答与解析进度
+- 最后生成一份 Markdown / PDF 形式的健康小结
 
-- `backend/`: FastAPI + SQLite 后端
-- `frontend/`: React + TypeScript 前端
-- `data/`: SQLite、上传文件和导出结果
+## 项目结构
 
-## 后端启动
+- `backend/`
+  - FastAPI + SQLModel + SQLite
+  - 负责报告解析、Agent、知识库、WHO 查询、小结导出
+- `frontend/`
+  - React + TypeScript + Vite
+  - 负责上传、对话、进度展示、小结展示
+- `data/`
+  - 数据库存储、上传文件、导出 PDF
 
-1. 安装 Python 3.11+
-2. 在 `backend/.env` 中配置千问与 WHO 凭据
-3. 安装依赖：
+## 启动方式
+
+### 后端
 
 ```powershell
 cd backend
-python -m pip install -e .
-```
-
-4. 启动：
-
-```powershell
+copy .env.example .env
+python -m pip install -e .[dev]
 uvicorn app.main:app --reload --port 8000
 ```
 
-## 前端启动
+### 前端
 
 ```powershell
 cd frontend
@@ -38,10 +40,48 @@ npm install
 npm run dev
 ```
 
-前端默认请求 `http://localhost:8000`。
+默认访问地址：
 
-## 说明
+- 前端：[http://localhost:5173](http://localhost:5173)
+- 后端接口文档：[http://localhost:8000/docs](http://localhost:8000/docs)
 
-- 这是 v1 最小实现，未包含鉴权、多用户和定时任务。
-- 原始文档中的密钥不能继续使用，部署前应全部轮换并写入环境变量。
+## 关键环境变量
 
+后端最重要的配置在 `backend/.env`：
+
+```env
+QWEN_API_KEY=your-api-key
+QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+QWEN_FAST_MODEL=qwen3.5-flash
+QWEN_MAX_MODEL=qwen3-max
+QWEN_VL_MODEL=qwen3-vl-flash
+SHORT_TERM_CONTEXT_TURNS=4
+WHO_CLIENT_ID=your-who-client-id
+WHO_CLIENT_SECRET=your-who-client-secret
+```
+
+说明：
+
+- `FAST_MODEL` 用于输入分析、报告拆解、轻量结构化任务
+- `MAX_MODEL` 用于最终高质量回答润色
+- `VL_MODEL` 用于图片类报告 OCR
+- WHO 凭据只影响“医学名词解释”这条链，不影响报告解析主流程
+
+## 当前版本的能力边界
+
+- 这是演示项目，不提供诊断、处方、剂量建议
+- 本地知识库是预置种子，不联网抓取公开网页
+- WHO ICD-11 主要用于术语标准化和增强术语解释的权威性
+- 报告解析对文本型 PDF 体验较好，扫描件仍依赖视觉模型
+- 后台任务目前使用 FastAPI `BackgroundTasks`，适合 Demo，不适合高并发生产环境
+
+## 学习文档
+
+如果你想系统理解这个 Demo，建议按下面顺序阅读：
+
+1. [项目流程解析.md](./项目流程解析.md)
+2. [后端流程解析.md](./后端流程解析.md)
+3. [前端流程解析.md](./前端流程解析.md)
+4. [主体Agent流程解析.md](./主体Agent流程解析.md)
+
+这四份文档是按“总览 -> 后端 -> 前端 -> Agent 核心逻辑”的顺序写的，适合从零开始理解整个项目。

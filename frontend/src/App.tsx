@@ -1,34 +1,194 @@
-import { FormEvent, useEffect, useState } from "react";
+import { Fragment, FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 
-import { bootstrapKnowledge, generateSummary, getKnowledgeSources, sendChat, uploadReport } from "./api";
-import type { AgentResponse, KnowledgeSourcesResponse, ReportParseResult, SummaryArtifact } from "./types";
+import { generateSummary, streamChat, streamReportProgress, uploadReport } from "./api";
+import type {
+  AgentResponse,
+  ChatStreamEvent,
+  ReportParseResult,
+  ReportProgressPayload,
+  SummaryArtifact,
+} from "./types";
 
 type MessageRow = {
+  id: string;
   role: "user" | "assistant";
   content: string;
   meta?: AgentResponse;
+  statusLabel?: string | null;
+  streaming?: boolean;
 };
+
+function renderInline(text: string): ReactNode[] {
+  const parts = text.split(/(\*\*.*?\*\*)/g).filter(Boolean);
+  return parts.map((part, index) => {
+    const match = /^\*\*(.*?)\*\*$/.exec(part);
+    if (match) {
+      return <strong key={`${part}-${index}`}>{match[1]}</strong>;
+    }
+    return <Fragment key={`${part}-${index}`}>{part}</Fragment>;
+  });
+}
+
+function renderParagraph(text: string, className?: string): ReactNode {
+  return <p className={className}>{renderInline(text)}</p>;
+}
+
+function renderMessageContent(content: string): ReactNode {
+  const normalized = content.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const blocks = normalized.split(/\n\s*\n/);
+  return blocks.map((block, blockIndex) => {
+    const lines = block
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      return null;
+    }
+
+    const heading = /^(#{1,3})\s+(.+)$/.exec(lines[0]);
+    if (heading) {
+      const level = heading[1].length;
+      const title = heading[2];
+      if (level === 1) {
+        return (
+          <h3 className="message-title" key={`block-${blockIndex}`}>
+            {renderInline(title)}
+          </h3>
+        );
+      }
+      if (level === 2) {
+        return (
+          <h4 className="message-subtitle" key={`block-${blockIndex}`}>
+            {renderInline(title)}
+          </h4>
+        );
+      }
+      return (
+        <h5 className="message-minor-title" key={`block-${blockIndex}`}>
+          {renderInline(title)}
+        </h5>
+      );
+    }
+
+    const unorderedItems = lines
+      .map((line) => /^[-*]\s+(.+)$/.exec(line))
+      .filter((item): item is RegExpExecArray => item !== null);
+    if (unorderedItems.length === lines.length) {
+      return (
+        <ul className="message-list" key={`block-${blockIndex}`}>
+          {unorderedItems.map((item, index) => (
+            <li key={`${item[1]}-${index}`}>{renderInline(item[1])}</li>
+          ))}
+        </ul>
+      );
+    }
+
+    const orderedItems = lines
+      .map((line) => /^\d+\.\s+(.+)$/.exec(line))
+      .filter((item): item is RegExpExecArray => item !== null);
+    if (orderedItems.length === lines.length) {
+      return (
+        <ol className="message-list ordered" key={`block-${blockIndex}`}>
+          {orderedItems.map((item, index) => (
+            <li key={`${item[1]}-${index}`}>{renderInline(item[1])}</li>
+          ))}
+        </ol>
+      );
+    }
+
+    const merged = lines.join(" ");
+    if (/^(重要提示|温馨提示|注意|说明)[:：]/.test(merged)) {
+      return (
+        <div className="message-note" key={`block-${blockIndex}`}>
+          {renderParagraph(merged)}
+        </div>
+      );
+    }
+
+    return (
+      <div className="message-paragraph-group" key={`block-${blockIndex}`}>
+        {lines.map((line, index) => (
+          <Fragment key={`${line}-${index}`}>{renderParagraph(line)}</Fragment>
+        ))}
+      </div>
+    );
+  });
+}
+
+function getStreamEventData<T>(event: ChatStreamEvent): T {
+  return event.data as T;
+}
+
+function formatDebugValue(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function reportStatusText(status: string): string {
+  if (status === "uploaded") return "已上传";
+  if (status === "processing") return "解析中";
+  if (status === "parsed") return "已完成";
+  if (status === "needs_review") return "需复核";
+  if (status === "error") return "失败";
+  return status;
+}
 
 export default function App() {
   const [report, setReport] = useState<ReportParseResult | null>(null);
+  const [reportProgress, setReportProgress] = useState<ReportProgressPayload | null>(null);
   const [summary, setSummary] = useState<SummaryArtifact | null>(null);
-  const [knowledgeStats, setKnowledgeStats] = useState<KnowledgeSourcesResponse | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const closeReportStreamRef = useRef<(() => void) | null>(null);
+
+  const reportReady = report ? ["parsed", "needs_review"].includes(report.parse_status) : true;
 
   useEffect(() => {
-    void refreshKnowledge();
+    return () => {
+      closeReportStreamRef.current?.();
+      closeReportStreamRef.current = null;
+    };
   }, []);
 
-  async function refreshKnowledge() {
-    try {
-      setKnowledgeStats(await getKnowledgeSources());
-    } catch {
-      setKnowledgeStats(null);
-    }
+  function subscribeReportProgress(reportId: string) {
+    closeReportStreamRef.current?.();
+    closeReportStreamRef.current = streamReportProgress(reportId, (event) => {
+      if (event.event === "progress") {
+        const data = getStreamEventData<ReportProgressPayload>(event);
+        setReportProgress(data);
+        setReport((prev) => (prev && prev.report_id === reportId ? { ...prev, parse_status: data.parse_status } : prev));
+        return;
+      }
+
+      if (event.event === "final") {
+        const data = getStreamEventData<ReportParseResult>(event);
+        setReport(data);
+        setReportProgress({
+          report_id: data.report_id,
+          stage: data.parse_status === "error" ? "failed" : "completed",
+          label: data.parse_status === "error" ? "报告解析失败" : "报告解析完成",
+          progress: 100,
+          parse_status: data.parse_status,
+          done: true,
+          error: null,
+        });
+        closeReportStreamRef.current?.();
+        closeReportStreamRef.current = null;
+        return;
+      }
+
+      if (event.event === "error") {
+        const data = getStreamEventData<{ detail?: string }>(event);
+        setError(data.detail ?? "报告进度流连接失败。");
+      }
+    });
   }
 
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
@@ -39,12 +199,23 @@ export default function App() {
       setError("请先选择报告文件。");
       return;
     }
+
     setBusy("upload");
     setError(null);
+    setSummary(null);
     try {
       const result = await uploadReport(file);
       setReport(result);
-      setSummary(null);
+      setReportProgress({
+        report_id: result.report_id,
+        stage: "queued",
+        label: "上传完成，等待开始解析",
+        progress: 5,
+        parse_status: result.parse_status,
+        done: false,
+        error: null,
+      });
+      subscribeReportProgress(result.report_id);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "上传失败。");
     } finally {
@@ -57,34 +228,78 @@ export default function App() {
     if (!prompt.trim()) {
       return;
     }
+
     const currentPrompt = prompt.trim();
+    const assistantId = crypto.randomUUID();
     setPrompt("");
-    setMessages((prev) => [...prev, { role: "user", content: currentPrompt }]);
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), role: "user", content: currentPrompt },
+      { id: assistantId, role: "assistant", content: "", statusLabel: "分析问题中", streaming: true },
+    ]);
     setBusy("chat");
     setError(null);
+
     try {
-      const response = await sendChat({
-        session_id: sessionId,
-        report_id: report?.report_id ?? null,
-        message: currentPrompt,
-      });
-      setSessionId(response.session_id);
-      setMessages((prev) => [...prev, { role: "assistant", content: response.answer, meta: response }]);
+      await streamChat(
+        {
+          session_id: sessionId,
+          report_id: report?.report_id ?? null,
+          message: currentPrompt,
+        },
+        (event) => {
+          if (event.event === "session") {
+            const data = getStreamEventData<{ session_id: string }>(event);
+            setSessionId(data.session_id);
+            return;
+          }
+
+          if (event.event === "status") {
+            const data = getStreamEventData<{ label: string }>(event);
+            setMessages((prev) =>
+              prev.map((item) => (item.id === assistantId ? { ...item, statusLabel: data.label, streaming: true } : item)),
+            );
+            return;
+          }
+
+          if (event.event === "delta") {
+            const data = getStreamEventData<{ text: string }>(event);
+            setMessages((prev) =>
+              prev.map((item) =>
+                item.id === assistantId
+                  ? { ...item, content: `${item.content}${data.text}`, statusLabel: "正在生成回答", streaming: true }
+                  : item,
+              ),
+            );
+            return;
+          }
+
+          if (event.event === "final") {
+            const data = getStreamEventData<AgentResponse>(event);
+            setSessionId(data.session_id);
+            setMessages((prev) =>
+              prev.map((item) =>
+                item.id === assistantId
+                  ? { ...item, content: data.answer, meta: data, statusLabel: null, streaming: false }
+                  : item,
+              ),
+            );
+            return;
+          }
+
+          if (event.event === "error") {
+            const data = getStreamEventData<{ detail?: string }>(event);
+            setError(data.detail ?? "流式响应失败。");
+          }
+        },
+      );
     } catch (chatError) {
       setError(chatError instanceof Error ? chatError.message : "对话请求失败。");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function handleBootstrapKnowledge() {
-    setBusy("knowledge");
-    setError(null);
-    try {
-      await bootstrapKnowledge();
-      await refreshKnowledge();
-    } catch (bootstrapError) {
-      setError(bootstrapError instanceof Error ? bootstrapError.message : "知识库初始化失败。");
+      setMessages((prev) =>
+        prev.map((item) =>
+          item.id === assistantId ? { ...item, statusLabel: null, streaming: false, content: item.content || "请求失败。" } : item,
+        ),
+      );
     } finally {
       setBusy(null);
     }
@@ -92,9 +307,10 @@ export default function App() {
 
   async function handleGenerateSummary() {
     if (!report) {
-      setError("请先上传报告再生成小结。");
+      setError("请先上传报告，再生成健康小结。");
       return;
     }
+
     const activeSessionId = sessionId ?? crypto.randomUUID();
     setSessionId(activeSessionId);
     setBusy("summary");
@@ -106,7 +322,7 @@ export default function App() {
       });
       setSummary(result);
     } catch (summaryError) {
-      setError(summaryError instanceof Error ? summaryError.message : "小结生成失败。");
+      setError(summaryError instanceof Error ? summaryError.message : "健康小结生成失败。");
     } finally {
       setBusy(null);
     }
@@ -119,12 +335,9 @@ export default function App() {
           <p className="eyebrow">Medical Agent v1</p>
           <h1>体检报告解读与健康咨询工作台</h1>
           <p className="hero-copy">
-            上传中文体检或检验报告，查看结构化指标，继续追问异常项，并生成带来源引用的健康小结。
+            上传报告后系统会自动解析并持续显示进度。对话区支持流式输出，适合围绕指标异常、术语解释和复查建议继续追问。
           </p>
         </div>
-        <button className="secondary-button" onClick={handleBootstrapKnowledge} disabled={busy !== null}>
-          {busy === "knowledge" ? "初始化中..." : "初始化联网知识库"}
-        </button>
       </section>
 
       {error ? <div className="error-banner">{error}</div> : null}
@@ -138,15 +351,31 @@ export default function App() {
           <form onSubmit={handleUpload} className="stack">
             <input name="report" type="file" accept=".pdf,.png,.jpg,.jpeg" />
             <button className="primary-button" type="submit" disabled={busy !== null}>
-              {busy === "upload" ? "解析中..." : "上传并解析"}
+              {busy === "upload" ? "上传中..." : "上传并开始解析"}
             </button>
           </form>
+
           {report ? (
             <div className="stack">
               <div className="status-line">
-                <strong>状态</strong>
-                <span>{report.parse_status}</span>
+                <strong>解析状态</strong>
+                <span>{reportStatusText(report.parse_status)}</span>
               </div>
+              {reportProgress ? (
+                <div className="progress-card">
+                  <div className="progress-head">
+                    <span className="progress-stage">{reportProgress.label}</span>
+                    <strong>{reportProgress.progress}%</strong>
+                  </div>
+                  <div className="progress-bar">
+                    <div className="progress-bar-fill" style={{ width: `${reportProgress.progress}%` }} />
+                  </div>
+                  <div className="progress-meta">
+                    <span>阶段：{reportProgress.stage}</span>
+                    <span>{reportProgress.done ? "已结束" : "进行中"}</span>
+                  </div>
+                </div>
+              ) : null}
               {report.parse_warnings.length > 0 ? (
                 <div className="warning-box">
                   {report.parse_warnings.map((warning) => (
@@ -167,7 +396,7 @@ export default function App() {
                     </div>
                   ))
                 ) : (
-                  <p className="muted">暂未识别出明确异常项。</p>
+                  <p className="muted">{reportReady ? "暂未识别到明确异常项。" : "正在解析报告，异常项会在完成后自动显示。"}</p>
                 )}
               </div>
             </div>
@@ -180,30 +409,93 @@ export default function App() {
             <span>{messages.length} 条消息</span>
           </div>
           <div className="chat-window">
-            {messages.length === 0 ? <p className="muted">可以询问报告指标、医学术语或常见症状方向。</p> : null}
-            {messages.map((message, index) => (
-              <div className={`message ${message.role}`} key={`${message.role}-${index}`}>
-                <p>{message.content}</p>
-                {message.meta?.citations?.length ? (
-                  <div className="citation-list">
-                    {message.meta.citations.map((citation) => (
-                      <a href={citation.url} key={citation.doc_id} target="_blank" rel="noreferrer">
-                        [{citation.trust_tier}] {citation.title}
-                      </a>
-                    ))}
+            {messages.length === 0 ? <p className="muted">可以询问报告指标、医学术语、常见症状方向或复查建议。</p> : null}
+            {messages.map((message) => (
+              <div className={`message ${message.role}`} key={message.id}>
+                {message.role === "assistant" ? (
+                  <div className="message-body rich">
+                    {renderMessageContent(message.content)}
+                    {message.streaming ? (
+                      <div className="typing-line" aria-live="polite">
+                        <span className="typing-cursor" aria-hidden="true" />
+                        <span className="typing-text">正在生成</span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="message-body">{message.content}</div>
+                )}
+
+                {message.statusLabel ? (
+                  <div className="stream-status">
+                    <span className="stream-status-dot" aria-hidden="true" />
+                    <span>{message.statusLabel}</span>
+                  </div>
+                ) : null}
+
+                {message.meta ? (
+                  <div className="message-footer">
+                    <div className="chip-row">
+                      <span className="meta-chip">意图：{message.meta.intent}</span>
+                      {message.meta.used_tools.map((tool) => (
+                        <span className="meta-chip" key={`${message.id}-${tool}`}>
+                          工具：{tool}
+                        </span>
+                      ))}
+                    </div>
+                    {message.meta.citations.length > 0 ? (
+                      <div className="chip-row">
+                        {message.meta.citations.map((citation) => (
+                          <span className="source-chip" key={citation.doc_id}>
+                            [{citation.trust_tier}] {citation.title}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {message.meta.debug ? (
+                      <details className="debug-panel">
+                        <summary>调试信息</summary>
+                        <div className="debug-grid">
+                          <section className="debug-section">
+                            <h6>used_tools</h6>
+                            <pre className="debug-pre">{formatDebugValue(message.meta.used_tools)}</pre>
+                          </section>
+                          {message.meta.debug.analysis ? (
+                            <section className="debug-section">
+                              <h6>analysis</h6>
+                              <pre className="debug-pre">{formatDebugValue(message.meta.debug.analysis)}</pre>
+                            </section>
+                          ) : null}
+                          {message.meta.debug.plan ? (
+                            <section className="debug-section">
+                              <h6>plan</h6>
+                              <pre className="debug-pre">{formatDebugValue(message.meta.debug.plan)}</pre>
+                            </section>
+                          ) : null}
+                          {message.meta.debug.synthesis ? (
+                            <section className="debug-section">
+                              <h6>synthesis</h6>
+                              <pre className="debug-pre">{formatDebugValue(message.meta.debug.synthesis)}</pre>
+                            </section>
+                          ) : null}
+                        </div>
+                      </details>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
             ))}
           </div>
+
           <form onSubmit={handleChat} className="chat-form">
             <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              placeholder="例如：报告里的甘油三酯偏高代表什么？需要挂什么科？"
+              placeholder="例如：这些异常指标代表了什么？总胆固醇和 LDL-C 偏高说明什么？"
+              disabled={!reportReady && report !== null}
             />
-            <button className="primary-button" type="submit" disabled={busy !== null}>
-              {busy === "chat" ? "分析中..." : "发送"}
+            <button className="primary-button" type="submit" disabled={busy !== null || (!reportReady && report !== null)}>
+              {busy === "chat" ? "处理中..." : "发送"}
             </button>
           </form>
         </article>
@@ -213,7 +505,7 @@ export default function App() {
             <h2>3. 健康小结</h2>
             <span>{summary ? "已生成" : "待生成"}</span>
           </div>
-          <button className="primary-button" onClick={handleGenerateSummary} disabled={busy !== null || !report}>
+          <button className="primary-button" onClick={handleGenerateSummary} disabled={busy !== null || !report || !reportReady}>
             {busy === "summary" ? "生成中..." : "生成 Markdown / PDF"}
           </button>
           {summary ? (
@@ -229,37 +521,7 @@ export default function App() {
               </a>
             </div>
           ) : (
-            <p className="muted">生成后会在这里展示结构化小结，并提供 PDF 下载。</p>
-          )}
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>4. 知识源状态</h2>
-            <span>{knowledgeStats ? `${knowledgeStats.total_docs} 条` : "不可用"}</span>
-          </div>
-          {knowledgeStats ? (
-            <div className="stack">
-              <div className="trust-grid">
-                {Object.entries(knowledgeStats.trust_breakdown).map(([tier, count]) => (
-                  <div className="trust-card" key={tier}>
-                    <strong>{tier}</strong>
-                    <span>{count}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="source-list">
-                {knowledgeStats.recent_docs.map((doc) => (
-                  <a href={doc.url} key={doc.doc_id} target="_blank" rel="noreferrer">
-                    <span>[{doc.trust_tier}]</span>
-                    <strong>{doc.title}</strong>
-                    <small>{doc.source_domain}</small>
-                  </a>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <p className="muted">启动后端后，这里会显示知识源统计和信任分级。</p>
+            <p className="muted">生成后会在这里显示 Markdown 预览，并提供 PDF 下载。</p>
           )}
         </article>
       </section>

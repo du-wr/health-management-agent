@@ -2,217 +2,122 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from html import unescape
-from urllib.parse import parse_qs, urlparse
 
-import httpx
-from bs4 import BeautifulSoup
 from sqlmodel import Session, select
 
-from app.core.config import get_settings
 from app.models.entities import KnowledgeDoc
+from app.services.knowledge_seed import LOCAL_KNOWLEDGE_SEEDS
 
 
-DISCOVERY_QUERIES = [
-    "site:nhc.gov.cn \u5065\u5eb7\u79d1\u666e \u4f53\u68c0 \u6307\u6807 \u5f02\u5e38",
-    "site:gov.cn \u5065\u5eb7 \u79d1\u666e \u5e38\u89c1\u75c7\u72b6 \u5c31\u533b",
-    "site:nmpa.gov.cn \u836f\u54c1 \u79d1\u666e \u7981\u5fcc",
-    "site:pkuph.cn \u5065\u5eb7\u79d1\u666e \u79d1\u5ba4",
-    "site:pumch.cn \u5065\u5eb7\u6559\u80b2 \u79d1\u666e",
-    "site:zs-hospital.sh.cn \u5065\u5eb7\u79d1\u666e \u6307\u6807",
-    "site:dxy.cn \u5e38\u89c1\u75c7\u72b6 \u79d1\u666e",
-]
-TRUST_A_HINTS = ("gov.cn", "nhc.gov.cn", "nmpa.gov.cn", "edu.cn", "hospital", "pkuph.cn", "pumch.cn")
-TRUST_B_HINTS = ("dxy.cn", "medlive.cn", "yxj.org.cn")
-EXCLUSION_PATTERNS = (
-    "\u8bba\u575b",
-    "\u95ee\u7b54",
-    "\u5e7f\u544a",
-    "\u62db\u5546",
-    "\u6302\u53f7\u7f51",
-    "\u9884\u7ea6\u6302\u53f7",
-    "\u63a8\u5e7f",
-    "\u89c6\u9891",
-)
-CHINA_CONTEXT_PATTERNS = (
-    "\u533b\u9662",
-    "\u95e8\u8bca",
-    "\u6302\u53f7",
-    "\u590d\u67e5",
-    "\u4e2d\u56fd",
-    "\u56fd\u5bb6\u536b\u5065\u59d4",
-    "\u56fd\u5bb6\u836f\u76d1\u5c40",
-)
-
-
-@dataclass
-class ClassifiedDocument:
-    title: str
-    url: str
-    source_domain: str
-    source_org: str
-    trust_tier: str
-    content_type: str
-    snippet: str
-    body_text: str
-    content_hash: str
+TOKEN_SPLIT_PATTERN = re.compile(r"[\s,.;:，。；？！/()（）\-]+")
 
 
 class KnowledgeService:
-    def __init__(self) -> None:
-        self.settings = get_settings()
+    def ensure_initialized(self, session: Session) -> dict[str, int | str]:
+        existing_count = self.count_docs(session)
+        if existing_count > 0:
+            return {"seeded": 0, "status": "existing"}
+        seeded = self.seed_local_knowledge(session)
+        return {"seeded": seeded, "status": "seeded_only"}
 
-    def bootstrap(self, session: Session) -> tuple[int, int]:
-        ingested = 0
-        skipped = 0
-        for query in DISCOVERY_QUERIES:
-            for candidate in self.discover(query):
-                if session.exec(select(KnowledgeDoc).where(KnowledgeDoc.url == candidate["url"])).first():
-                    skipped += 1
-                    continue
-                fetched = self.fetch(candidate["url"])
-                if not fetched:
-                    skipped += 1
-                    continue
-                classified = self.classify(fetched)
-                if not classified:
-                    skipped += 1
-                    continue
-                self.ingest(session, classified)
-                ingested += 1
-        return ingested, skipped
+    def count_docs(self, session: Session) -> int:
+        return len(session.exec(select(KnowledgeDoc.id)).all())
 
-    def discover(self, query: str) -> list[dict[str, str]]:
-        response = httpx.get(
-            self.settings.bing_search_base,
-            params={"q": query, "setlang": "zh-Hans"},
-            headers={"User-Agent": self.settings.user_agent},
-            timeout=20.0,
-            follow_redirects=True,
-        )
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-        candidates: list[dict[str, str]] = []
-        for item in soup.select("li.b_algo")[:8]:
-            anchor = item.select_one("h2 a")
-            if not anchor or not anchor.get("href"):
+    def seed_local_knowledge(self, session: Session) -> int:
+        created = 0
+        for item in LOCAL_KNOWLEDGE_SEEDS:
+            url = f"seed://knowledge/{item['slug']}"
+            existing = session.exec(select(KnowledgeDoc).where(KnowledgeDoc.url == url)).first()
+            if existing:
                 continue
-            href = anchor["href"]
-            if "bing.com" in href and "url" in href:
-                parsed = parse_qs(urlparse(href).query)
-                href = parsed.get("u", [href])[0]
-            candidates.append({"title": anchor.get_text(" ", strip=True), "url": href})
-        return candidates
-
-    def fetch(self, url: str) -> dict[str, str] | None:
-        try:
-            response = httpx.get(
-                url,
-                headers={"User-Agent": self.settings.user_agent},
-                timeout=20.0,
-                follow_redirects=True,
+            alias_text = " ".join(item.get("aliases", []))
+            doc = KnowledgeDoc(
+                url=url,
+                title=str(item["title"]),
+                source_domain="local.seed",
+                source_org="local_seed",
+                trust_tier="A",
+                content_type="seed",
+                snippet=str(item["snippet"]),
+                body_text=f"{alias_text}\n{item['body_text']}",
+                content_hash=hashlib.sha256(
+                    f"{item['slug']}::{item['title']}::{alias_text}::{item['body_text']}".encode("utf-8")
+                ).hexdigest(),
+                crawl_status="seeded",
+                crawled_at=datetime.now(timezone.utc),
             )
-            response.raise_for_status()
-        except Exception:
-            return None
-        if "text/html" not in response.headers.get("content-type", ""):
-            return None
-        soup = BeautifulSoup(response.text, "lxml")
-        title = soup.title.get_text(strip=True) if soup.title else url
-        paragraphs: list[str] = []
-        for node in soup.select("article p, .article p, .content p, p"):
-            text = self._clean_text(node.get_text(" ", strip=True))
-            if len(text) >= 20:
-                paragraphs.append(text)
-        body_text = "\n".join(paragraphs[:40]).strip()
-        if not body_text:
-            return None
-        return {"title": title, "url": str(response.url), "body_text": body_text}
+            self.ingest_doc(session, doc)
+            created += 1
+        return created
 
-    def classify(self, fetched: dict[str, str]) -> ClassifiedDocument | None:
-        title = self._clean_text(fetched["title"])
-        body_text = fetched["body_text"]
-        if not self._is_chinese(title + body_text):
-            return None
-        if any(pattern in title + body_text for pattern in EXCLUSION_PATTERNS):
-            return None
-        if not any(pattern in body_text for pattern in CHINA_CONTEXT_PATTERNS):
-            return None
-        domain = urlparse(fetched["url"]).netloc.lower()
-        return ClassifiedDocument(
-            title=title,
-            url=fetched["url"],
-            source_domain=domain,
-            source_org=self._infer_org(domain),
-            trust_tier=self._get_trust_tier(domain),
-            content_type="article",
-            snippet=body_text[:180],
-            body_text=body_text,
-            content_hash=hashlib.sha256(f"{fetched['url']}::{body_text}".encode("utf-8")).hexdigest(),
-        )
-
-    def ingest(self, session: Session, classified: ClassifiedDocument) -> None:
-        doc = KnowledgeDoc(
-            url=classified.url,
-            title=classified.title,
-            source_domain=classified.source_domain,
-            source_org=classified.source_org,
-            trust_tier=classified.trust_tier,
-            content_type=classified.content_type,
-            snippet=classified.snippet,
-            body_text=classified.body_text,
-            content_hash=classified.content_hash,
-            crawl_status="ingested",
-            crawled_at=datetime.now(timezone.utc),
-        )
+    def ingest_doc(self, session: Session, doc: KnowledgeDoc) -> None:
         session.add(doc)
         session.commit()
         session.refresh(doc)
-        session.connection().exec_driver_sql(
-            """
-            INSERT INTO knowledge_doc_fts(doc_id, title, snippet, body_text, trust_tier, source_domain)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (doc.id, doc.title, doc.snippet, doc.body_text, doc.trust_tier, doc.source_domain),
-        )
-        session.commit()
+        try:
+            session.connection().exec_driver_sql(
+                """
+                INSERT INTO knowledge_doc_fts(doc_id, title, snippet, body_text, trust_tier, source_domain)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (doc.id, doc.title, doc.snippet, doc.body_text, doc.trust_tier, doc.source_domain),
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
 
     def retrieve(self, session: Session, query: str, limit: int = 5) -> list[KnowledgeDoc]:
-        escaped_query = query.replace('"', " ").strip()
-        if not escaped_query:
+        normalized_query = query.strip()
+        if not normalized_query:
             return []
-        docs: list[KnowledgeDoc] = []
-        try:
-            rows = session.connection().exec_driver_sql(
-                """
-                SELECT doc_id FROM knowledge_doc_fts
-                WHERE knowledge_doc_fts MATCH ?
-                LIMIT ?
-                """,
-                (escaped_query, limit * 3),
-            ).fetchall()
-            for (doc_id,) in rows:
-                doc = session.get(KnowledgeDoc, doc_id)
-                if doc:
-                    docs.append(doc)
-        except Exception:
-            docs = session.exec(
-                select(KnowledgeDoc)
-                .where(KnowledgeDoc.body_text.contains(escaped_query) | KnowledgeDoc.title.contains(escaped_query))
-                .limit(limit * 3)
-            ).all()
-        docs.sort(key=self._trust_sort_key)
-        allow_c = not any(doc.trust_tier in {"A", "B"} for doc in docs)
-        selected: list[KnowledgeDoc] = []
-        for doc in docs:
-            if doc.trust_tier == "C" and not allow_c:
+
+        direct_matches = session.exec(
+            select(KnowledgeDoc)
+            .where(
+                KnowledgeDoc.title.contains(normalized_query)
+                | KnowledgeDoc.snippet.contains(normalized_query)
+                | KnowledgeDoc.body_text.contains(normalized_query)
+            )
+            .limit(limit * 5)
+        ).all()
+        if direct_matches:
+            direct_matches.sort(key=lambda doc: (self._trust_rank(doc.trust_tier), doc.title))
+            return direct_matches[:limit]
+
+        tokens = [token for token in TOKEN_SPLIT_PATTERN.split(normalized_query) if len(token) >= 2]
+        candidates = session.exec(select(KnowledgeDoc)).all()
+        scored: list[tuple[int, KnowledgeDoc]] = []
+        for doc in candidates:
+            haystack = f"{doc.title} {doc.snippet} {doc.body_text}".lower()
+            score = 0
+            for token in tokens:
+                token_lower = token.lower()
+                if token_lower in haystack:
+                    score += 2 if token_lower in doc.title.lower() else 1
+            if score > 0:
+                scored.append((score, doc))
+        scored.sort(key=lambda item: (-item[0], self._trust_rank(item[1].trust_tier), item[1].title))
+        return [doc for _, doc in scored[:limit]]
+
+    def explain_lab_items(self, session: Session, item_names: list[str]) -> list[dict[str, str]]:
+        explanations: list[dict[str, str]] = []
+        for item_name in item_names:
+            matched = self._match_lab_doc(session, item_name)
+            if not matched:
                 continue
-            selected.append(doc)
-            if len(selected) >= limit:
-                break
-        return selected
+            explanations.append(
+                {
+                    "name": item_name,
+                    "title": matched.title,
+                    "snippet": matched.snippet,
+                    "detail": matched.body_text,
+                    "doc_id": matched.id,
+                    "url": matched.url,
+                    "trust_tier": matched.trust_tier,
+                }
+            )
+        return explanations
 
     def source_stats(self, session: Session) -> tuple[int, dict[str, int], list[KnowledgeDoc]]:
         docs = session.exec(select(KnowledgeDoc).order_by(KnowledgeDoc.crawled_at.desc())).all()
@@ -221,33 +126,54 @@ class KnowledgeService:
             breakdown[doc.trust_tier] = breakdown.get(doc.trust_tier, 0) + 1
         return len(docs), breakdown, docs[:10]
 
-    def _is_chinese(self, text: str) -> bool:
-        return len(re.findall(r"[\u4e00-\u9fff]", text)) >= 20
+    def pack_docs(self, docs: list[KnowledgeDoc]) -> list[dict[str, str]]:
+        return [
+            {
+                "doc_id": doc.id,
+                "title": doc.title,
+                "url": doc.url,
+                "trust_tier": doc.trust_tier,
+                "snippet": doc.snippet,
+                "detail": doc.body_text[:600],
+            }
+            for doc in docs
+        ]
 
-    def _get_trust_tier(self, domain: str) -> str:
-        if any(hint in domain for hint in TRUST_A_HINTS):
-            return "A"
-        if any(hint in domain for hint in TRUST_B_HINTS):
-            return "B"
-        return "C"
+    def _match_lab_doc(self, session: Session, item_name: str) -> KnowledgeDoc | None:
+        normalized_item = self._normalize(item_name)
+        candidates = session.exec(select(KnowledgeDoc)).all()
+        best_doc: KnowledgeDoc | None = None
+        best_score = 0
+        for doc in candidates:
+            haystack = self._normalize(f"{doc.title} {doc.snippet} {doc.body_text}")
+            score = 0
+            alias_line = doc.body_text.splitlines()[0] if doc.body_text else ""
+            aliases = [self._normalize(alias) for alias in alias_line.split() if alias.strip()]
+            if normalized_item == self._normalize(doc.title):
+                score += 30
+            if normalized_item in aliases:
+                score += 25
+            if normalized_item in haystack:
+                score += 5
+            title_normalized = self._normalize(doc.title)
+            if title_normalized in normalized_item or normalized_item in title_normalized:
+                score += 4
+            for token in TOKEN_SPLIT_PATTERN.split(item_name):
+                token_lower = token.lower().strip()
+                if len(token_lower) < 2:
+                    continue
+                if token_lower in haystack:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_doc = doc
+        return best_doc if best_score > 0 else None
 
-    def _infer_org(self, domain: str) -> str:
-        if "gov.cn" in domain:
-            return "gov"
-        if "edu.cn" in domain:
-            return "medical_school"
-        if "hospital" in domain or "pkuph.cn" in domain or "pumch.cn" in domain:
-            return "public_hospital"
-        if domain.endswith("dxy.cn") or "medlive" in domain:
-            return "medical_platform"
-        return "other"
+    def _trust_rank(self, trust_tier: str) -> int:
+        return {"A": 0, "B": 1, "C": 2}.get(trust_tier, 3)
 
-    def _clean_text(self, text: str) -> str:
-        return re.sub(r"\s+", " ", unescape(text)).strip()
-
-    def _trust_sort_key(self, doc: KnowledgeDoc) -> tuple[int, str]:
-        order = {"A": 0, "B": 1, "C": 2}
-        return (order.get(doc.trust_tier, 3), doc.title)
+    def _normalize(self, text: str) -> str:
+        return re.sub(r"[\s\-_/()（）]+", "", text.lower())
 
 
 knowledge_service = KnowledgeService()

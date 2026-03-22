@@ -9,10 +9,13 @@ import pdfplumber
 from fastapi import UploadFile
 from sqlmodel import Session, delete, select
 
+from app.core.database import engine
 from app.core.schemas import LabItem as LabItemSchema
 from app.core.schemas import ReportParseResult
 from app.models.entities import LabItem, Report
 from app.services.llm import llm_service
+from app.services.prompt_templates import lab_extraction_system_prompt, report_ocr_prompt
+from app.services.report_progress_service import report_progress_service
 
 
 LAB_LINE_PATTERN = re.compile(
@@ -24,52 +27,90 @@ LAB_LINE_PATTERN = re.compile(
 
 
 class ReportService:
-    async def parse_upload(self, session: Session, file: UploadFile, upload_dir: Path) -> ReportParseResult:
+    async def create_upload(self, session: Session, file: UploadFile, upload_dir: Path) -> ReportParseResult:
         suffix = Path(file.filename or "upload.bin").suffix or ".bin"
         file_name = file.filename or f"report{suffix}"
         storage_name = f"{uuid4()}{suffix}"
         saved_path = upload_dir / storage_name
         saved_path.write_bytes(await file.read())
 
-        report = Report(file_name=file_name, file_path=str(saved_path))
+        report = Report(
+            file_name=file_name,
+            file_path=str(saved_path),
+            parse_status="processing",
+            parse_warnings_json="[]",
+        )
         session.add(report)
         session.commit()
         session.refresh(report)
+        report_progress_service.initialize(report.id, parse_status=report.parse_status)
+        return self._build_report_result(report, [])
 
-        raw_text, warnings = self.extract_text(saved_path)
-        items = self.extract_lab_items(raw_text)
+    def process_report(self, report_id: str) -> None:
+        with Session(engine) as session:
+            self.process_report_with_session(session, report_id)
 
-        session.exec(delete(LabItem).where(LabItem.report_id == report.id))
-        for item in items:
-            session.add(
-                LabItem(
-                    report_id=report.id,
-                    name=item.name,
-                    value_raw=item.value_raw,
-                    value_num=item.value_num,
-                    unit=item.unit,
-                    reference_range=item.reference_range,
-                    status=item.status,
-                    clinical_note=item.clinical_note,
-                )
-            )
+    def process_report_with_session(self, session: Session, report_id: str) -> None:
+        report = session.get(Report, report_id)
+        if not report:
+            return
 
-        report.raw_text = raw_text
-        report.parse_status = "parsed" if items else "needs_review"
-        report.parse_warnings_json = json.dumps(warnings, ensure_ascii=False)
+        report.parse_status = "processing"
         session.add(report)
         session.commit()
-
-        abnormal_items = [item for item in items if item.status in {"high", "low"}]
-        return ReportParseResult(
-            report_id=report.id,
-            file_name=report.file_name,
-            items=items,
-            abnormal_items=abnormal_items,
-            raw_text=raw_text,
-            parse_warnings=warnings,
+        report_progress_service.update(
+            report.id,
+            stage="processing",
+            label="开始解析报告",
+            progress=10,
             parse_status=report.parse_status,
         )
+
+        try:
+            raw_text, warnings = self.extract_text(Path(report.file_path), report_id=report.id)
+            report_progress_service.update(
+                report.id,
+                stage="parsing_items",
+                label="正在抽取结构化指标",
+                progress=68,
+                parse_status=report.parse_status,
+            )
+            items = self.extract_lab_items(raw_text)
+
+            report_progress_service.update(
+                report.id,
+                stage="saving",
+                label="正在保存解析结果",
+                progress=90,
+                parse_status=report.parse_status,
+            )
+            session.exec(delete(LabItem).where(LabItem.report_id == report.id))
+            for item in items:
+                session.add(
+                    LabItem(
+                        report_id=report.id,
+                        name=item.name,
+                        value_raw=item.value_raw,
+                        value_num=item.value_num,
+                        unit=item.unit,
+                        reference_range=item.reference_range,
+                        status=item.status,
+                        clinical_note=item.clinical_note,
+                    )
+                )
+
+            report.raw_text = raw_text
+            report.parse_status = "parsed" if items else "needs_review"
+            report.parse_warnings_json = json.dumps(warnings, ensure_ascii=False)
+            session.add(report)
+            session.commit()
+            report_progress_service.mark_complete(report.id, parse_status=report.parse_status)
+        except Exception as exc:
+            report.parse_status = "error"
+            report.parse_warnings_json = json.dumps([f"Parse failed: {exc}"], ensure_ascii=False)
+            session.add(report)
+            session.commit()
+            report_progress_service.mark_failed(report.id, error=str(exc))
 
     def get_report(self, session: Session, report_id: str) -> ReportParseResult:
         report = session.get(Report, report_id)
@@ -77,33 +118,19 @@ class ReportService:
             raise ValueError("Report not found.")
 
         items = session.exec(select(LabItem).where(LabItem.report_id == report_id)).all()
-        schema_items = [
-            LabItemSchema(
-                name=item.name,
-                value_raw=item.value_raw,
-                value_num=item.value_num,
-                unit=item.unit,
-                reference_range=item.reference_range,
-                status=item.status,
-                clinical_note=item.clinical_note,
-            )
-            for item in items
-        ]
-        warnings = json.loads(report.parse_warnings_json or "[]")
-        abnormal_items = [item for item in schema_items if item.status in {"high", "low"}]
-        return ReportParseResult(
-            report_id=report.id,
-            file_name=report.file_name,
-            items=schema_items,
-            abnormal_items=abnormal_items,
-            raw_text=report.raw_text,
-            parse_warnings=warnings,
-            parse_status=report.parse_status,
-        )
+        return self._build_report_result(report, items)
 
-    def extract_text(self, path: Path) -> tuple[str, list[str]]:
+    def extract_text(self, path: Path, report_id: str | None = None) -> tuple[str, list[str]]:
         warnings: list[str] = []
         if path.suffix.lower() == ".pdf":
+            if report_id:
+                report_progress_service.update(
+                    report_id,
+                    stage="extracting_text",
+                    label="正在提取 PDF 文本",
+                    progress=24,
+                    parse_status="processing",
+                )
             text_chunks: list[str] = []
             try:
                 with pdfplumber.open(path) as pdf:
@@ -115,18 +142,39 @@ class ReportService:
             if len(raw_text) >= 40:
                 return raw_text, warnings
             warnings.append("PDF text was too short. Configure OCR for scanned reports.")
+            if report_id:
+                report_progress_service.update(
+                    report_id,
+                    stage="review_needed",
+                    label="文本提取不足，当前报告可能需要 OCR 或人工复核",
+                    progress=58,
+                    parse_status="processing",
+                )
             return raw_text, warnings
 
         if path.suffix.lower() in {".png", ".jpg", ".jpeg"} and llm_service.is_configured:
             try:
-                ocr_text = llm_service.image_to_text(
-                    path,
-                    "Extract all text from this Chinese medical checkup report in reading order.",
-                )
+                if report_id:
+                    report_progress_service.update(
+                        report_id,
+                        stage="ocr",
+                        label="正在执行图片 OCR",
+                        progress=42,
+                        parse_status="processing",
+                    )
+                ocr_text = llm_service.image_to_text(path, report_ocr_prompt())
                 return ocr_text.strip(), warnings
             except Exception as exc:
                 warnings.append(f"OCR failed: {exc}")
 
+        if report_id:
+            report_progress_service.update(
+                report_id,
+                stage="ocr_unavailable",
+                label="当前环境无法完成 OCR，已返回已有文本结果",
+                progress=60,
+                parse_status="processing",
+            )
         warnings.append("OCR is unavailable in the current environment.")
         return "", warnings
 
@@ -136,12 +184,8 @@ class ReportService:
 
         if llm_service.is_configured:
             try:
-                payload = llm_service.chat_json(
-                    system_prompt=(
-                        "You extract lab items from Chinese medical checkup text. "
-                        "Return a JSON object with an items array. "
-                        'Each item must contain: name, value_raw, value_num, unit, reference_range, clinical_note.'
-                    ),
+                payload = llm_service.chat_json_fast(
+                    system_prompt=lab_extraction_system_prompt(),
                     user_prompt=raw_text[:12000],
                 )
                 items = []
@@ -177,6 +221,35 @@ class ReportService:
             if parsed:
                 items.append(parsed)
         return items
+
+    def _build_report_result(self, report: Report, items: list[LabItem | LabItemSchema]) -> ReportParseResult:
+        schema_items: list[LabItemSchema] = []
+        for item in items:
+            if isinstance(item, LabItemSchema):
+                schema_items.append(item)
+            else:
+                schema_items.append(
+                    LabItemSchema(
+                        name=item.name,
+                        value_raw=item.value_raw,
+                        value_num=item.value_num,
+                        unit=item.unit,
+                        reference_range=item.reference_range,
+                        status=item.status,
+                        clinical_note=item.clinical_note,
+                    )
+                )
+        warnings = json.loads(report.parse_warnings_json or "[]")
+        abnormal_items = [item for item in schema_items if item.status in {"high", "low"}]
+        return ReportParseResult(
+            report_id=report.id,
+            file_name=report.file_name,
+            items=schema_items,
+            abnormal_items=abnormal_items,
+            raw_text=report.raw_text,
+            parse_warnings=warnings,
+            parse_status=report.parse_status,
+        )
 
     def _finalize_item(
         self,

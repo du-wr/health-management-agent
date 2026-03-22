@@ -27,6 +27,16 @@ export interface ReportParseResult {
   parse_status: string;
 }
 
+export interface ReportProgressPayload {
+  report_id: string;
+  stage: string;
+  label: string;
+  progress: number;
+  parse_status: string;
+  done: boolean;
+  error?: string | null;
+}
+
 export interface Citation {
   source_type: string;
   doc_id: string;
@@ -34,6 +44,12 @@ export interface Citation {
   url: string;
   trust_tier: TrustTier;
   snippet: string;
+}
+
+export interface AgentDebug {
+  analysis?: Record<string, unknown>;
+  plan?: Record<string, unknown>;
+  synthesis?: Record<string, unknown>;
 }
 
 export interface AgentResponse {
@@ -45,6 +61,7 @@ export interface AgentResponse {
   follow_up_questions: string[];
   safety_level: "safe" | "caution" | "handoff";
   handoff_required: boolean;
+  debug?: AgentDebug | null;
 }
 
 export interface SummaryArtifact {
@@ -70,4 +87,9 @@ export interface KnowledgeSourcesResponse {
   total_docs: number;
   trust_breakdown: Record<string, number>;
   recent_docs: KnowledgeDoc[];
+}
+
+export interface ChatStreamEvent {
+  event: string;
+  data: unknown;
 }

@@ -10,41 +10,30 @@ from sqlmodel import Session
 
 from app.core.schemas import SummaryArtifact as SummaryArtifactSchema
 from app.models.entities import SummaryArtifact
+from app.services.knowledge_service import knowledge_service
+from app.services.llm import llm_service
+from app.services.prompt_templates import summary_generation_system_prompt, summary_generation_user_prompt
 from app.services.report_service import report_service
 
 
 class SummaryService:
     def generate(self, session: Session, report_id: str, session_id: str, output_dir: Path) -> SummaryArtifactSchema:
         report = report_service.get_report(session, report_id)
-        missing_reference = "\u672a\u63d0\u4f9b"
-        abnormal_lines = [
-            f"- {item.name}: {item.value_raw}{item.unit} "
-            f"(\u53c2\u8003\u8303\u56f4\uff1a{item.reference_range or missing_reference})"
-            for item in report.abnormal_items
-        ] or [
-            "- \u672a\u68c0\u6d4b\u5230\u660e\u786e\u5f02\u5e38\u9879\uff0c\u5efa\u8bae\u7ed3\u5408\u539f\u59cb\u62a5\u544a\u548c\u533b\u751f\u610f\u89c1\u590d\u6838\u3002"
-        ]
+        if report.parse_status not in {"parsed", "needs_review"}:
+            raise ValueError("Report is still processing.")
 
-        markdown = "\n".join(
-            [
-                "# \u5065\u5eb7\u5c0f\u7ed3",
-                "",
-                "## \u5f02\u5e38\u6307\u6807\u6458\u8981",
-                *abnormal_lines,
-                "",
-                "## \u7efc\u5408\u89e3\u8bfb\u4e0e\u98ce\u9669\u63d0\u793a",
-                "\u672c\u5c0f\u7ed3\u57fa\u4e8e\u4e0a\u4f20\u7684\u4f53\u68c0/\u68c0\u9a8c\u7ed3\u679c\u81ea\u52a8\u751f\u6210\uff0c"
-                "\u4ec5\u63d0\u4f9b\u98ce\u9669\u65b9\u5411\u548c\u590d\u67e5\u5efa\u8bae\uff0c\u4e0d\u6784\u6210\u8bca\u65ad\u610f\u89c1\u3002",
-                "",
-                "## \u751f\u6d3b\u65b9\u5f0f\u5efa\u8bae",
-                "\u5efa\u8bae\u7ed3\u5408\u5f02\u5e38\u6307\u6807\u5173\u6ce8\u4f5c\u606f\u3001\u996e\u98df\u3001\u8fd0\u52a8\u4e0e\u590d\u67e5\u5b89\u6392\uff0c"
-                "\u907f\u514d\u81ea\u884c\u7528\u836f\u6216\u5ffd\u89c6\u6301\u7eed\u75c7\u72b6\u3002",
-                "",
-                "## \u63a8\u8350\u5c31\u533b\u79d1\u5ba4",
-                "\u82e5\u4e3a\u8840\u8102\u3001\u8840\u7cd6\u3001\u809d\u80be\u529f\u80fd\u7b49\u5f02\u5e38\uff0c"
-                "\u53ef\u4f18\u5148\u8003\u8651\u5168\u79d1\u3001\u5185\u5206\u6ccc\u79d1\u6216\u76f8\u5e94\u4e13\u79d1\u8fdb\u4e00\u6b65\u8bc4\u4f30\u3002",
-            ]
+        explanations = knowledge_service.explain_lab_items(
+            session,
+            [item.name for item in report.abnormal_items[:6]] or [item.name for item in report.items[:6]],
         )
+        report_summary = {
+            "report_id": report.report_id,
+            "file_name": report.file_name,
+            "abnormal_items": [item.model_dump(mode="json") for item in report.abnormal_items[:8]],
+            "item_count": len(report.items),
+            "abnormal_count": len(report.abnormal_items),
+        }
+        markdown = self._build_markdown(report_summary, explanations)
 
         pdf_dir = output_dir / "pdf"
         pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -67,10 +56,55 @@ class SummaryService:
             created_at=artifact.created_at,
         )
 
+    def _build_markdown(self, report_summary: dict[str, object], explanations: list[dict[str, str]]) -> str:
+        if llm_service.is_configured:
+            try:
+                markdown = llm_service.chat_text_max(
+                    system_prompt=summary_generation_system_prompt(),
+                    user_prompt=summary_generation_user_prompt(report_summary, explanations),
+                )
+                if markdown.strip():
+                    return markdown.strip()
+            except Exception:
+                pass
+
+        abnormal_items = report_summary.get("abnormal_items", [])
+        if isinstance(abnormal_items, list) and abnormal_items:
+            abnormal_lines = [
+                f"- {item['name']}: {item['value_raw']}{item.get('unit', '')}（参考范围：{item.get('reference_range') or '未提供'}）"
+                for item in abnormal_items[:8]
+                if isinstance(item, dict)
+            ]
+        else:
+            abnormal_lines = ["- 暂未识别到明确异常项，建议结合原始报告和医生意见复核。"]
+
+        explanation_lines = [f"- {item['title']}：{item['snippet']}" for item in explanations[:5]]
+        if not explanation_lines:
+            explanation_lines = ["- 当前没有足够的指标解释信息，建议结合复查结果和医生意见继续评估。"]
+
+        return "\n".join(
+            [
+                "# 健康小结",
+                "",
+                "## 异常指标摘要",
+                *abnormal_lines,
+                "",
+                "## 综合解读与风险提示",
+                *explanation_lines,
+                "",
+                "## 生活方式建议",
+                "- 结合异常指标关注饮食结构、运动、体重变化和规律复查。",
+                "- 避免自行用药或仅凭单次体检结果下结论。",
+                "",
+                "## 推荐就医科室",
+                "- 如为血脂、血糖、肝肾功能等异常，可优先考虑全科、内分泌科或相关专科进一步评估。",
+            ]
+        )
+
     def _write_pdf(self, markdown: str, path: Path) -> None:
         pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
         pdf = canvas.Canvas(str(path), pagesize=A4)
-        pdf.setTitle("\u5065\u5eb7\u5c0f\u7ed3")
+        pdf.setTitle("健康小结")
         pdf.setFont("STSong-Light", 12)
         _, height = A4
         y = height - 48

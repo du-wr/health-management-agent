@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from openai import OpenAI
 
@@ -24,11 +24,22 @@ class LLMService:
     def is_configured(self) -> bool:
         return self.client is not None
 
-    def chat_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+    @property
+    def fast_model(self) -> str:
+        return self.settings.qwen_fast_model or self.settings.qwen_chat_model
+
+    @property
+    def max_model(self) -> str:
+        return self.settings.qwen_max_model or self.settings.qwen_chat_model
+
+    def _resolve_model(self, model: str | None = None) -> str:
+        return model or self.settings.qwen_chat_model
+
+    def chat_json(self, system_prompt: str, user_prompt: str, *, model: str | None = None) -> dict[str, Any]:
         if not self.client:
             raise RuntimeError("Qwen API is not configured.")
         response = self.client.chat.completions.create(
-            model=self.settings.qwen_chat_model,
+            model=self._resolve_model(model),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -39,11 +50,17 @@ class LLMService:
         content = response.choices[0].message.content or "{}"
         return json.loads(content)
 
-    def chat_text(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_json_fast(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        return self.chat_json(system_prompt, user_prompt, model=self.fast_model)
+
+    def chat_json_max(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        return self.chat_json(system_prompt, user_prompt, model=self.max_model)
+
+    def chat_text(self, system_prompt: str, user_prompt: str, *, model: str | None = None) -> str:
         if not self.client:
             raise RuntimeError("Qwen API is not configured.")
         response = self.client.chat.completions.create(
-            model=self.settings.qwen_chat_model,
+            model=self._resolve_model(model),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -51,6 +68,34 @@ class LLMService:
             temperature=0.3,
         )
         return response.choices[0].message.content or ""
+
+    def chat_text_fast(self, system_prompt: str, user_prompt: str) -> str:
+        return self.chat_text(system_prompt, user_prompt, model=self.fast_model)
+
+    def chat_text_max(self, system_prompt: str, user_prompt: str) -> str:
+        return self.chat_text(system_prompt, user_prompt, model=self.max_model)
+
+    def chat_text_stream(self, system_prompt: str, user_prompt: str, *, model: str | None = None) -> Iterator[str]:
+        if not self.client:
+            raise RuntimeError("Qwen API is not configured.")
+        stream = self.client.chat.completions.create(
+            model=self._resolve_model(model),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            stream=True,
+        )
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield delta
+
+    def chat_text_stream_max(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
+        return self.chat_text_stream(system_prompt, user_prompt, model=self.max_model)
 
     def image_to_text(self, image_path: Path, prompt: str) -> str:
         if not self.client:
@@ -74,4 +119,3 @@ class LLMService:
 
 
 llm_service = LLMService()
-

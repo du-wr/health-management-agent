@@ -57,6 +57,12 @@ class KnowledgeDoc(BaseModel):
     snippet: str
 
 
+class AgentDebug(BaseModel):
+    analysis: dict[str, object] = Field(default_factory=dict)
+    plan: dict[str, object] = Field(default_factory=dict)
+    synthesis: dict[str, object] = Field(default_factory=dict)
+
+
 class AgentResponse(BaseModel):
     session_id: str
     intent: IntentName
@@ -66,6 +72,7 @@ class AgentResponse(BaseModel):
     follow_up_questions: list[str] = Field(default_factory=list)
     safety_level: SafetyLevel = "safe"
     handoff_required: bool = False
+    debug: AgentDebug | None = None
 
 
 class SummaryArtifact(BaseModel):
@@ -86,31 +93,7 @@ class SummaryRequest(BaseModel):
     report_id: str
 
 
-class KnowledgeBootstrapResponse(BaseModel):
-    ingested: int
-    skipped: int
-    message: str
-
-
 class KnowledgeSourcesResponse(BaseModel):
     total_docs: int
     trust_breakdown: dict[str, int]
     recent_docs: list[KnowledgeDoc]
-
-
-class PlannedAction(BaseModel):
-    tool: Literal[
-        "search_report_items",
-        "interpret_lab",
-        "search_symptoms",
-        "query_drug",
-        "retrieve_knowledge",
-        "lookup_icd11",
-        "generate_health_summary",
-    ]
-    args: dict[str, str] = Field(default_factory=dict)
-
-
-class PlannerOutput(BaseModel):
-    thoughts: str
-    actions: list[PlannedAction] = Field(default_factory=list)

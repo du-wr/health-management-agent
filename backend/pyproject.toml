@@ -5,14 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "medical-agent"
 version = "0.1.0"
-description = "体检报告解读与健康咨询 Agent backend"
+description = "Medical checkup report interpretation and health consultation backend"
 requires-python = ">=3.11"
 dependencies = [
-  "beautifulsoup4>=4.12.3",
   "fastapi>=0.115.6",
   "httpx>=0.28.1",
-  "lxml>=5.3.0",
-  "markdown-it-py>=3.0.0",
   "openai>=1.58.1",
   "pdfplumber>=0.11.5",
   "pydantic-settings>=2.7.0",
@@ -29,4 +26,3 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-
