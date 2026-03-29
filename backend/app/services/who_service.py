@@ -13,15 +13,22 @@ logger = logging.getLogger(__name__)
 
 
 class WHOService:
+    """WHO ICD-11 查询服务。
+
+    当前项目只把它用于“医学名词解释”增强，而不是整套系统的通用知识底座。
+    """
+
     def __init__(self) -> None:
         self.settings = get_settings()
         self._access_token: str | None = None
         self._token_expiry: datetime | None = None
 
     def is_configured(self) -> bool:
+        """只有配置了 client id 和 client secret 才允许发起 WHO 请求。"""
         return bool(self.settings.who_client_id and self.settings.who_client_secret)
 
     def _get_token(self) -> str:
+        """获取并缓存 WHO 的访问令牌。"""
         if not self.is_configured():
             raise RuntimeError("WHO ICD-11 API is not configured.")
 
@@ -44,6 +51,7 @@ class WHOService:
         return self._access_token
 
     def search(self, query: str, *, limit: int = 3, language: str = "zh") -> dict[str, Any]:
+        """按术语查询 WHO ICD-11。"""
         if not self.is_configured():
             return {"query": query, "matches": []}
 
@@ -65,6 +73,7 @@ class WHOService:
         matches = []
         for item in raw_matches:
             uri = str(item.get("id") or "").strip()
+            # 先拿搜索结果，再按实体 URI 拉详情，把 definition / synonyms 补完整。
             detail = self._fetch_entity(uri, token=token, language=language) if uri else {}
             matches.append(
                 {
@@ -80,6 +89,7 @@ class WHOService:
         return {"query": query, "matches": matches}
 
     def _fetch_entity(self, uri: str, *, token: str, language: str) -> dict[str, Any]:
+        """按 WHO 返回的实体 URI 再查一次详情。"""
         if not uri:
             return {}
         entity_url = uri.replace("http://", "https://")
@@ -103,6 +113,7 @@ class WHOService:
         }
 
     def _extract_values(self, value: Any) -> list[str]:
+        """把 WHO 结果里可能很嵌套的字段拉平为字符串列表。"""
         if value is None:
             return []
         if isinstance(value, str):
@@ -118,6 +129,7 @@ class WHOService:
         return []
 
     def _extract_text(self, value: Any) -> str:
+        """尽量从任意 JSON 结构中抽取人能读的文本。"""
         if value is None:
             return ""
         if isinstance(value, str):

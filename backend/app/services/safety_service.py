@@ -48,6 +48,7 @@ DEFAULT_SAFETY_APPENDIX = (
 
 @dataclass
 class SafetyDecision:
+    """安全判断结果。"""
     level: str
     handoff_required: bool
     reason: str | None = None
@@ -55,6 +56,11 @@ class SafetyDecision:
 
 class SafetyService:
     def evaluate(self, message: str) -> SafetyDecision:
+        """对用户输入做第一层医疗安全筛查。
+
+        这一步优先于 Agent 的其他所有能力，因为只要命中高风险问题，
+        系统就不应该继续普通问答链。
+        """
         text = message.strip()
         if any(keyword in text for keyword in EMERGENCY_KEYWORDS):
             return SafetyDecision(

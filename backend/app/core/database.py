@@ -5,6 +5,9 @@ from sqlmodel import Session, SQLModel, create_engine
 from app.core.config import get_settings
 
 
+# 数据库层只做两件事：
+# 1. 创建引擎和 Session
+# 2. 提供初始化和依赖注入能力
 settings = get_settings()
 engine = create_engine(
     f"sqlite:///{settings.sqlite_path}",
@@ -13,10 +16,13 @@ engine = create_engine(
 
 
 def init_db() -> None:
+    """初始化数据库表和 FTS 辅助表。"""
     from app.models import entities  # noqa: F401
 
+    # 先让 SQLModel 根据 ORM 定义创建普通表。
     SQLModel.metadata.create_all(engine)
     with engine.begin() as connection:
+        # 额外创建一个 SQLite FTS5 虚拟表，供知识库文本检索使用。
         connection.exec_driver_sql(
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_doc_fts
@@ -33,5 +39,6 @@ def init_db() -> None:
 
 
 def get_session() -> Generator[Session, None, None]:
+    """给 FastAPI 路由提供数据库会话依赖。"""
     with Session(engine) as session:
         yield session

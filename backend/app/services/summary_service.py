@@ -18,6 +18,7 @@ from app.services.report_service import report_service
 
 class SummaryService:
     def generate(self, session: Session, report_id: str, session_id: str, output_dir: Path) -> SummaryArtifactSchema:
+        """生成一份 Markdown + PDF 小结。"""
         report = report_service.get_report(session, report_id)
         if report.parse_status not in {"parsed", "needs_review"}:
             raise ValueError("Report is still processing.")
@@ -57,6 +58,7 @@ class SummaryService:
         )
 
     def _build_markdown(self, report_summary: dict[str, object], explanations: list[dict[str, str]]) -> str:
+        """优先让 max 模型生成 Markdown，失败时再走模板兜底。"""
         if llm_service.is_configured:
             try:
                 markdown = llm_service.chat_text_max(
@@ -102,6 +104,7 @@ class SummaryService:
         )
 
     def _write_pdf(self, markdown: str, path: Path) -> None:
+        """把 Markdown 文本按简单排版写成 PDF。"""
         pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
         pdf = canvas.Canvas(str(path), pagesize=A4)
         pdf.setTitle("健康小结")

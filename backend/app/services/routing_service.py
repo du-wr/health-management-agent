@@ -5,6 +5,12 @@ from app.core.schemas import IntentName
 
 class RoutingService:
     def route(self, message: str, has_report: bool) -> IntentName:
+        """规则版意图路由。
+
+        这是一个低成本、可解释的兜底分类器：
+        - 模型不可用时可以工作
+        - 即使模型可用，也能作为输入分析的 fallback
+        """
         text = message.strip()
         if any(
             keyword in text

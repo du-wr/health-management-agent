@@ -9,6 +9,12 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
+    """项目的统一配置对象。
+
+    所有环境变量都会在这里收口，业务代码通过 `get_settings()`
+    获取配置，而不是直接到处读环境变量。
+    """
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = Field(default="Medical Checkup Agent", alias="APP_NAME")
@@ -31,14 +37,17 @@ class Settings(BaseSettings):
 
     @property
     def upload_path(self) -> Path:
+        """上传文件最终落盘的目录。"""
         return (BASE_DIR / self.upload_dir).resolve()
 
     @property
     def output_path(self) -> Path:
+        """导出文件目录，当前主要用于保存 PDF。"""
         return (BASE_DIR / self.output_dir).resolve()
 
     @property
     def sqlite_path(self) -> Path:
+        """把 sqlite URL 解析成磁盘上的实际路径。"""
         if self.database_url.startswith("sqlite:///"):
             return (BASE_DIR / self.database_url.removeprefix("sqlite:///")).resolve()
         raise ValueError("Only sqlite database_url is supported in this project.")
@@ -46,6 +55,7 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """读取并缓存配置，同时确保运行所需目录存在。"""
     settings = Settings()
     settings.upload_path.mkdir(parents=True, exist_ok=True)
     (settings.output_path / "pdf").mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,14 @@ import json
 from typing import Any
 
 
+# 这个文件集中存放所有提示词模板。
+# 这样做的好处是：
+# 1. Agent 主流程文件不必混入大段 prompt 文本
+# 2. 以后调 prompt 时只需要集中修改这里
+# 3. 不同任务可以明确使用不同模板，而不是“一套 prompt 打天下”
+
 def report_ocr_prompt() -> str:
+    """视觉模型 OCR 提示词。"""
     return (
         "你是中文体检报告 OCR 助手。"
         "请按阅读顺序提取图片中的原始文字，尽量保留项目名、数值、单位、参考范围、超声结论和医生提示。"
@@ -13,6 +20,7 @@ def report_ocr_prompt() -> str:
 
 
 def lab_extraction_system_prompt() -> str:
+    """报告结构化抽取提示词。"""
     return (
         "你是中文体检报告结构化抽取助手。"
         "请从报告文本中识别检验或体检项目，并返回 JSON 对象，顶层字段只允许为 items。"
@@ -22,6 +30,7 @@ def lab_extraction_system_prompt() -> str:
 
 
 def intent_router_system_prompt() -> str:
+    """早期意图分类模板。当前主链更多使用 input_analysis，但这里仍可复用。"""
     return (
         "你是医疗健康咨询 Agent 的意图分类器。"
         "请把用户问题分类到以下四类之一："
@@ -33,6 +42,7 @@ def intent_router_system_prompt() -> str:
 
 
 def intent_router_user_prompt(message: str, has_report: bool, conversation_history: list[dict[str, Any]]) -> str:
+    """把意图分类输入包装成 JSON。"""
     return json.dumps(
         {
             "message": message,
@@ -44,6 +54,11 @@ def intent_router_user_prompt(message: str, has_report: bool, conversation_histo
 
 
 def input_analysis_system_prompt() -> str:
+    """输入分析提示词。
+
+    这是当前 Agent 的第一层模型思考：
+    它不是直接回答，而是先决定怎么理解和改写用户输入。
+    """
     return (
         "你是医疗健康咨询 Agent 的输入分析器。"
         "你会收到用户问题、是否存在报告上下文以及最近几轮对话。"
@@ -61,6 +76,7 @@ def input_analysis_system_prompt() -> str:
 
 
 def input_analysis_user_prompt(message: str, has_report: bool, conversation_history: list[dict[str, Any]]) -> str:
+    """输入分析的用户侧 JSON 负载。"""
     return json.dumps(
         {
             "message": message,
@@ -72,6 +88,7 @@ def input_analysis_user_prompt(message: str, has_report: bool, conversation_hist
 
 
 def lab_batch_interpreter_system_prompt() -> str:
+    """批量指标解释提示词。"""
     return (
         "你是体检指标批量解读助手。"
         "你会收到多个指标、同一份报告中的相关项目，以及本地知识库片段。"
@@ -82,6 +99,7 @@ def lab_batch_interpreter_system_prompt() -> str:
 
 
 def report_follow_up_planner_system_prompt() -> str:
+    """报告追问拆解提示词。"""
     return (
         "你是体检报告追问拆解器。"
         "你会收到用户当前问题、最近几轮对话、报告中的重点异常项和相关指标。"
@@ -106,6 +124,7 @@ def report_follow_up_planner_user_prompt(
     focus_items: list[dict[str, Any]],
     related_items: list[dict[str, Any]],
 ) -> str:
+    """报告追问拆解输入。"""
     return json.dumps(
         {
             "message": message,
@@ -118,6 +137,7 @@ def report_follow_up_planner_user_prompt(
 
 
 def report_synthesis_system_prompt() -> str:
+    """综合异常层整理提示词。"""
     return (
         "你是体检报告综合解读整理器。"
         "你会收到当前问题、报告追问拆解计划、逐项指标解释和相关指标。"
@@ -139,6 +159,7 @@ def report_synthesis_user_prompt(
     interpretations: list[dict[str, Any]],
     related_items: list[dict[str, Any]],
 ) -> str:
+    """综合异常层输入。"""
     return json.dumps(
         {
             "message": message,
@@ -151,6 +172,7 @@ def report_synthesis_user_prompt(
 
 
 def report_answer_polish_system_prompt() -> str:
+    """报告答案润色提示词。"""
     return (
         "你是体检报告解读润色助手。"
         "你会收到一份已经结构完整的报告解读草稿。"
@@ -170,6 +192,7 @@ def report_answer_polish_user_prompt(
     plan: dict[str, Any],
     synthesis: dict[str, Any],
 ) -> str:
+    """报告答案润色输入。"""
     return json.dumps(
         {
             "message": message,
@@ -186,6 +209,7 @@ def lab_batch_interpreter_user_prompt(
     related_items: list[dict[str, Any]],
     knowledge_docs: list[dict[str, Any]],
 ) -> str:
+    """批量指标解释输入。"""
     return json.dumps(
         {
             "items": items,
@@ -197,6 +221,7 @@ def lab_batch_interpreter_user_prompt(
 
 
 def answer_composer_system_prompt() -> str:
+    """通用最终回答生成提示词。"""
     return (
         "你是体检报告解读与健康咨询 Agent 的回答生成器。"
         "请根据用户问题、最近几轮对话、意图、工具结果和引用信息，生成中文回答。"
@@ -212,6 +237,7 @@ def answer_composer_system_prompt() -> str:
 
 
 def term_explanation_system_prompt() -> str:
+    """医学名词解释专用提示词。"""
     return (
         "你是医学名词解释助手。"
         "你会收到用户提问、本地知识库内容，以及可选的 WHO ICD-11 检索结果。"
@@ -235,6 +261,7 @@ def answer_composer_user_prompt(
     tool_outputs: list[dict[str, Any]],
     citations: list[dict[str, Any]],
 ) -> str:
+    """通用最终回答生成输入。"""
     return json.dumps(
         {
             "intent": intent,
@@ -248,6 +275,7 @@ def answer_composer_user_prompt(
 
 
 def answer_repair_system_prompt() -> str:
+    """半成品回答修复提示词。"""
     return (
         "你是医疗问答结果修复助手。"
         "你会收到用户原问题、回答意图、已有半成品回答以及工具结果。"
@@ -264,6 +292,7 @@ def answer_repair_user_prompt(
     tool_outputs: list[dict[str, Any]],
     citations: list[dict[str, Any]],
 ) -> str:
+    """半成品回答修复输入。"""
     return json.dumps(
         {
             "intent": intent,
@@ -277,6 +306,7 @@ def answer_repair_user_prompt(
 
 
 def summary_generation_system_prompt() -> str:
+    """健康小结 Markdown 生成提示词。"""
     return (
         "你是体检健康小结生成助手。"
         "请输出 Markdown，固定包含以下四节："
@@ -289,6 +319,7 @@ def summary_generation_system_prompt() -> str:
 
 
 def summary_generation_user_prompt(report_summary: dict[str, Any], explanations: list[dict[str, Any]]) -> str:
+    """健康小结生成输入。"""
     return json.dumps(
         {
             "report_summary": report_summary,

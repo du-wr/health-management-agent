@@ -14,7 +14,14 @@ TOKEN_SPLIT_PATTERN = re.compile(r"[\s,.;:，。；？！/()（）\-]+")
 
 
 class KnowledgeService:
+    """本地知识库服务。
+
+    这个项目最终选择了“本地种子知识库”而不是联网抓取，
+    因为演示阶段更强调稳定、可控和可解释。
+    """
+
     def ensure_initialized(self, session: Session) -> dict[str, int | str]:
+        """如果数据库里还没有知识文档，就自动灌入本地种子。"""
         existing_count = self.count_docs(session)
         if existing_count > 0:
             return {"seeded": 0, "status": "existing"}
@@ -25,6 +32,7 @@ class KnowledgeService:
         return len(session.exec(select(KnowledgeDoc.id)).all())
 
     def seed_local_knowledge(self, session: Session) -> int:
+        """把 `knowledge_seed.py` 里的静态知识写入数据库。"""
         created = 0
         for item in LOCAL_KNOWLEDGE_SEEDS:
             url = f"seed://knowledge/{item['slug']}"
@@ -52,6 +60,7 @@ class KnowledgeService:
         return created
 
     def ingest_doc(self, session: Session, doc: KnowledgeDoc) -> None:
+        """写入主表，并尽量同步写入 FTS 辅助表。"""
         session.add(doc)
         session.commit()
         session.refresh(doc)
@@ -68,6 +77,12 @@ class KnowledgeService:
             session.rollback()
 
     def retrieve(self, session: Session, query: str, limit: int = 5) -> list[KnowledgeDoc]:
+        """根据查询词检索知识文档。
+
+        当前策略比较朴素：
+        1. 先做直接包含匹配
+        2. 如果没有明显结果，再拆 token 做简单打分
+        """
         normalized_query = query.strip()
         if not normalized_query:
             return []
@@ -101,6 +116,11 @@ class KnowledgeService:
         return [doc for _, doc in scored[:limit]]
 
     def explain_lab_items(self, session: Session, item_names: list[str]) -> list[dict[str, str]]:
+        """根据指标名获取解释素材。
+
+        报告解读链并不是把异常项直接丢给模型，
+        而是先尽量命中本地知识库，再把命中的内容作为后续综合和润色的原料。
+        """
         explanations: list[dict[str, str]] = []
         for item_name in item_names:
             matched = self._match_lab_doc(session, item_name)
@@ -120,6 +140,7 @@ class KnowledgeService:
         return explanations
 
     def source_stats(self, session: Session) -> tuple[int, dict[str, int], list[KnowledgeDoc]]:
+        """返回知识库规模和信任等级分布。"""
         docs = session.exec(select(KnowledgeDoc).order_by(KnowledgeDoc.crawled_at.desc())).all()
         breakdown = {"A": 0, "B": 0, "C": 0}
         for doc in docs:
@@ -127,6 +148,7 @@ class KnowledgeService:
         return len(docs), breakdown, docs[:10]
 
     def pack_docs(self, docs: list[KnowledgeDoc]) -> list[dict[str, str]]:
+        """把 ORM 文档压缩成更适合放进 prompt 的字典结构。"""
         return [
             {
                 "doc_id": doc.id,
@@ -140,6 +162,11 @@ class KnowledgeService:
         ]
 
     def _match_lab_doc(self, session: Session, item_name: str) -> KnowledgeDoc | None:
+        """尽量把一条指标名映射到最合适的知识条目。
+
+        这里不是复杂检索引擎，而是一个“标题 + 别名 + 正文”的简单打分器。
+        对体检指标这种相对稳定的词表，效果通常足够。
+        """
         normalized_item = self._normalize(item_name)
         candidates = session.exec(select(KnowledgeDoc)).all()
         best_doc: KnowledgeDoc | None = None

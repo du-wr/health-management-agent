@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+# 这一层定义的是“接口之间交换的数据结构”，不是数据库表。
+# 可以把它理解成前后端、服务之间共同遵守的契约。
 IntentName = Literal[
     "report_follow_up",
     "term_explanation",
@@ -17,6 +19,7 @@ LabStatus = Literal["high", "low", "normal", "unknown"]
 
 
 class LabItem(BaseModel):
+    """单个体检/检验指标的标准化表示。"""
     name: str
     value_raw: str
     value_num: float | None = None
@@ -27,6 +30,7 @@ class LabItem(BaseModel):
 
 
 class ReportParseResult(BaseModel):
+    """前端真正消费的一份报告解析结果。"""
     report_id: str
     file_name: str
     items: list[LabItem]
@@ -37,6 +41,7 @@ class ReportParseResult(BaseModel):
 
 
 class Citation(BaseModel):
+    """回答中的一条来源引用。"""
     source_type: str
     doc_id: str
     title: str
@@ -46,6 +51,7 @@ class Citation(BaseModel):
 
 
 class KnowledgeDoc(BaseModel):
+    """对知识文档的简化表达，主要用于接口返回。"""
     doc_id: str
     title: str
     url: str
@@ -58,12 +64,14 @@ class KnowledgeDoc(BaseModel):
 
 
 class AgentDebug(BaseModel):
+    """给前端调试面板展示的中间结果。"""
     analysis: dict[str, object] = Field(default_factory=dict)
     plan: dict[str, object] = Field(default_factory=dict)
     synthesis: dict[str, object] = Field(default_factory=dict)
 
 
 class AgentResponse(BaseModel):
+    """一次聊天回答的标准返回结构。"""
     session_id: str
     intent: IntentName
     answer: str
@@ -76,6 +84,7 @@ class AgentResponse(BaseModel):
 
 
 class SummaryArtifact(BaseModel):
+    """健康小结生成结果。"""
     summary_id: str
     markdown: str
     pdf_path: str
@@ -83,17 +92,20 @@ class SummaryArtifact(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    """聊天请求体。"""
     session_id: str | None = None
     report_id: str | None = None
     message: str
 
 
 class SummaryRequest(BaseModel):
+    """小结生成请求体。"""
     session_id: str
     report_id: str
 
 
 class KnowledgeSourcesResponse(BaseModel):
+    """知识库统计接口的返回结构。"""
     total_docs: int
     trust_breakdown: dict[str, int]
     recent_docs: list[KnowledgeDoc]

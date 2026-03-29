@@ -7,10 +7,12 @@ from sqlmodel import Field, SQLModel
 
 
 def utc_now() -> datetime:
+    """统一生成 UTC 时间，避免各表时间来源不一致。"""
     return datetime.now(timezone.utc)
 
 
 class Report(SQLModel, table=True):
+    """一份上传报告的主表。"""
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     file_name: str
     file_path: str
@@ -21,6 +23,7 @@ class Report(SQLModel, table=True):
 
 
 class LabItem(SQLModel, table=True):
+    """报告里的单个结构化指标。"""
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     report_id: str = Field(index=True)
     name: str
@@ -33,6 +36,7 @@ class LabItem(SQLModel, table=True):
 
 
 class ChatSession(SQLModel, table=True):
+    """一段连续对话的会话对象。"""
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     report_id: str | None = Field(default=None, index=True)
     title: str = "健康咨询"
@@ -40,6 +44,10 @@ class ChatSession(SQLModel, table=True):
 
 
 class ChatMessage(SQLModel, table=True):
+    """会话中的一条消息。
+
+    这里既保存用户消息，也保存助手消息。
+    """
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     session_id: str = Field(index=True)
     role: str
@@ -51,6 +59,11 @@ class ChatMessage(SQLModel, table=True):
 
 
 class KnowledgeDoc(SQLModel, table=True):
+    """知识库文档表。
+
+    即使当前知识来自本地种子，也统一保存成文档记录，
+    这样检索、引用和统计逻辑都能复用。
+    """
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     url: str = Field(unique=True, index=True)
     title: str
@@ -68,6 +81,7 @@ class KnowledgeDoc(SQLModel, table=True):
 
 
 class SummaryArtifact(SQLModel, table=True):
+    """一份已生成的健康小结。"""
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     report_id: str = Field(index=True)
     session_id: str = Field(index=True)

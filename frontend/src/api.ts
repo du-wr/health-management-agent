@@ -8,6 +8,7 @@ import type {
 const API_BASE = "http://localhost:8000/api";
 
 async function unwrap<T>(response: Response): Promise<T> {
+  // 普通 JSON 接口统一在这里做错误处理，避免每个 API 都重复写样板代码。
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "请求失败。" }));
     throw new Error(error.detail ?? "请求失败。");
@@ -16,6 +17,8 @@ async function unwrap<T>(response: Response): Promise<T> {
 }
 
 function parseSseBlock(rawEvent: string): ChatStreamEvent | null {
+  // 后端返回的是标准 SSE 文本块，这里负责把一段原始文本拆成
+  // `{ event, data }` 这种前端更容易消费的对象。
   const lines = rawEvent.split("\n").filter(Boolean);
   let eventName = "message";
   const dataLines: string[] = [];
@@ -39,6 +42,7 @@ function parseSseBlock(rawEvent: string): ChatStreamEvent | null {
 }
 
 export async function uploadReport(file: File): Promise<ReportParseResult> {
+  // 上传接口使用 multipart/form-data，因为浏览器文件上传最自然的方式就是 FormData。
   const formData = new FormData();
   formData.append("file", file);
   const response = await fetch(`${API_BASE}/reports/upload`, {
@@ -56,6 +60,8 @@ export async function streamChat(
   },
   onEvent: (event: ChatStreamEvent) => void,
 ): Promise<void> {
+  // 这里没有使用 EventSource，是因为聊天接口是 POST，
+  // 而原生 EventSource 只支持 GET。于是改用 fetch + ReadableStream 手动解析 SSE。
   const response = await fetch(`${API_BASE}/agent/chat/stream`, {
     method: "POST",
     headers: {
@@ -81,6 +87,7 @@ export async function streamChat(
     }
 
     buffer += decoder.decode(value, { stream: true });
+    // SSE 事件之间以空行分隔，因此这里不断查找 "\n\n" 边界。
     let boundaryIndex = buffer.indexOf("\n\n");
     while (boundaryIndex !== -1) {
       const rawEvent = buffer.slice(0, boundaryIndex);
@@ -99,6 +106,7 @@ export function streamReportProgress(
   reportId: string,
   onEvent: (event: ChatStreamEvent) => void,
 ): () => void {
+  // 报告进度流是 GET，所以这里可以直接使用浏览器原生 EventSource。
   const eventSource = new EventSource(`${API_BASE}/reports/${reportId}/stream`);
 
   eventSource.addEventListener("progress", (event) => {
@@ -131,6 +139,7 @@ export async function generateSummary(payload: {
   session_id: string;
   report_id: string;
 }): Promise<SummaryArtifact> {
+  // 小结生成是普通 POST，不需要流式。
   const response = await fetch(`${API_BASE}/summaries/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -140,6 +149,7 @@ export async function generateSummary(payload: {
 }
 
 export async function getKnowledgeSources(): Promise<KnowledgeSourcesResponse> {
+  // 当前主页面不再直接展示知识库区块，但保留这个接口方便调试和扩展。
   const response = await fetch(`${API_BASE}/knowledge/sources`);
   return unwrap<KnowledgeSourcesResponse>(response);
 }

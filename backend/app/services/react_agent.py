@@ -49,6 +49,12 @@ HEADING_PREFIX_PATTERN = re.compile(r"^(?:#{1,6}\s*|\d+[.)、]\s*|-+\s*)")
 
 
 class AgentExecutionResult(BaseModel):
+    """一次 Agent 执行的中间结果。
+
+    这是内部对象，不直接暴露给前端。
+    它负责把后续生成答案还会用到的材料都串在一起。
+    """
+
     intent: str
     answer: str = ""
     citations: list[Citation] = Field(default_factory=list)
@@ -62,10 +68,14 @@ class AgentExecutionResult(BaseModel):
 
 
 class BatchInterpretationResult(BaseModel):
+    """批量指标解释模型的结构化输出。"""
+
     items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class InputAnalysisResult(BaseModel):
+    """输入分析阶段的输出。"""
+
     intent: str = "collect_more_info"
     rewritten_query: str = ""
     normalized_term: str = ""
@@ -76,6 +86,8 @@ class InputAnalysisResult(BaseModel):
 
 
 class ReportFollowUpPlan(BaseModel):
+    """报告追问拆解计划。"""
+
     focus_item_names: list[str] = Field(default_factory=list)
     need_item_explanations: bool = True
     need_synthesis: bool = True
@@ -86,6 +98,8 @@ class ReportFollowUpPlan(BaseModel):
 
 
 class ReportSynthesisResult(BaseModel):
+    """综合异常层的中间结果。"""
+
     summary: str = ""
     priority_axes: list[str] = Field(default_factory=list)
     combined_findings: list[str] = Field(default_factory=list)
@@ -93,8 +107,12 @@ class ReportSynthesisResult(BaseModel):
 
 
 class ReactAgentService:
+    """整个健康咨询 Agent 的主协调器。"""
+
     def __init__(self) -> None:
+        """初始化配置和内存级回答缓存。"""
         self.settings = get_settings()
+        # 简单内存缓存：避免同一问题在短时间内重复走整条 Agent 链。
         self.answer_cache: dict[str, AgentExecutionResult] = {}
 
     def respond(
@@ -105,6 +123,18 @@ class ReactAgentService:
         message: str,
         output_dir: Path,
     ) -> AgentResponse:
+        """同步回答入口。"""
+        # 主流程：
+        # 1. 找到或创建会话
+        # 2. 先落用户消息
+        # 3. 处理安全拦截、报告未完成等即时返回场景
+        # 4. 命中缓存则直接复用
+        # 5. 否则执行完整 Agent 主链
+        # 6. 落助手消息并返回
+        # 流式接口和同步接口使用同一条业务链，只是输出方式不同。
+        # 这里会把执行过程拆成 session / status / delta / final 四类事件。
+        # 流式接口和同步接口使用同一条业务链，只是输出方式不同。
+        # 这里会把执行过程拆成 session / status / delta / final 四类事件。
         chat_session = self._get_or_create_session(session, session_id, report_id, message)
         self._store_message(session, chat_session.id, "user", message)
         immediate = self._handle_immediate_response(session, chat_session.id, report_id, message)
@@ -125,6 +155,7 @@ class ReactAgentService:
         if not isinstance(execution, AgentExecutionResult):
             execution = None
         if execution and self._is_incomplete_answer(self._strip_duplicate_appendix(execution.answer)):
+            # 如果缓存里已经是一条半成品答案，宁可丢掉重算。
             self.answer_cache.pop(cache_key, None)
             execution = None
 
@@ -161,6 +192,10 @@ class ReactAgentService:
         message: str,
         output_dir: Path,
     ) -> Iterator[dict[str, Any]]:
+        """流式回答入口。
+
+        和 `respond()` 的主要区别在于它会把执行过程拆成多个 SSE 事件推给前端。
+        """
         chat_session = self._get_or_create_session(session, session_id, report_id, message)
         self._store_message(session, chat_session.id, "user", message)
         yield {"event": "session", "data": {"session_id": chat_session.id}}
@@ -219,6 +254,9 @@ class ReactAgentService:
         report_id: str | None,
         message: str,
     ) -> AgentResponse | None:
+        """处理需要立即结束的分支，例如安全拦截或报告未解析完成。"""
+        # 这里放的是“先于一切智能流程”的快速判断。
+        # 一旦命中高风险或报告未完成，就不再继续后面的 Agent 推理。
         decision = safety_service.evaluate(message)
         if decision.handoff_required:
             answer = f"{decision.reason or '当前问题涉及高风险医疗决策。'}\n\n请尽快联系医生或线下医疗机构获取专业评估。"
@@ -256,6 +294,9 @@ class ReactAgentService:
         report_id: str | None,
         message: str,
     ) -> AgentExecutionResult:
+        """Agent 主链的前半段：先用结构化、可控、较便宜的步骤准备信息。"""
+        # 先读取短期上下文，再基于上下文做输入分析。
+        # 这一层的目标是准备材料，而不是直接生成答案。
         conversation_history = self._recent_conversation_context(session, chat_session_id)
         analysis = self._analyze_input(message, report_id is not None, conversation_history)
         if analysis.intent == "collect_more_info":
@@ -318,6 +359,8 @@ class ReactAgentService:
         focus_items: list[dict[str, Any]],
         related_items: list[dict[str, Any]],
     ) -> ReportFollowUpPlan:
+        """让 fast 模型把宽泛的报告问题拆成可执行计划。"""
+        # 先准备一个规则版 fallback，保证模型失败时报告链仍然能继续跑。
         fallback = ReportFollowUpPlan(
             focus_item_names=[item.get("name", "") for item in focus_items[:4] if item.get("name")],
             need_item_explanations=True,
@@ -353,6 +396,7 @@ class ReactAgentService:
         focus_items: list[dict[str, Any]],
         related_items: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """根据计划挑出本轮应该重点解释的指标。"""
         if not plan.focus_item_names:
             return focus_items[:6]
         selected: list[dict[str, Any]] = []
@@ -370,6 +414,7 @@ class ReactAgentService:
         return selected[:6] or focus_items[:6]
 
     def _match_report_item_by_name(self, target_name: str, items: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """在一批报告指标里，根据名字模糊匹配目标项。"""
         normalized_target = self._normalize_item_name(target_name)
         for item in items:
             item_name = str(item.get("name") or "")
@@ -379,6 +424,7 @@ class ReactAgentService:
         return None
 
     def _normalize_item_name(self, name: str) -> str:
+        """把指标名标准化，方便做宽松匹配。"""
         return re.sub(r"[\s\\-_/()（）]+", "", name).lower()
 
     def _build_report_synthesis(
@@ -388,6 +434,8 @@ class ReactAgentService:
         interpretations: list[dict[str, Any]],
         related_items: list[dict[str, Any]],
     ) -> ReportSynthesisResult:
+        """把多个单项解释提升为综合异常层。"""
+        # 如果模型失败，至少也要有一版“综合结论”可用。
         fallback = self._fallback_report_synthesis(plan, interpretations)
         if not llm_service.is_configured or not interpretations:
             return fallback
@@ -416,6 +464,7 @@ class ReactAgentService:
             return fallback
 
     def _fallback_report_synthesis(self, plan: ReportFollowUpPlan, interpretations: list[dict[str, Any]]) -> ReportSynthesisResult:
+        """当综合异常层模型失败时，用规则拼一版可用的综合结果。"""
         axes = [axis for axis in plan.synthesis_axes[:4] if axis]
         if not axes:
             for item in interpretations[:4]:
@@ -443,6 +492,8 @@ class ReactAgentService:
         message: str,
         analysis: InputAnalysisResult,
     ) -> AgentExecutionResult:
+        """处理医学名词解释。优先本地知识，其次 WHO，最后再由模型润色。"""
+        # 术语解释优先用“改写后或标准化后的术语”去查资料，而不是死磕用户原话。
         effective_query = analysis.rewritten_query or analysis.normalized_term or self._strip_question_tail(message)
         docs = knowledge_service.retrieve(session, effective_query) if analysis.use_local_knowledge else []
         if not docs and effective_query != message:
@@ -478,6 +529,7 @@ class ReactAgentService:
         )
 
     def _lookup_who_with_candidates(self, message: str, docs: list[Any]) -> dict[str, Any]:
+        """按多个候选查询词依次尝试 WHO，直到命中为止。"""
         candidates = self._build_who_queries(message, docs)
         for query in candidates:
             result = who_service.search(query)
@@ -488,6 +540,7 @@ class ReactAgentService:
         return {"query": message, "matched_query": None, "query_candidates": candidates, "matches": []}
 
     def _build_who_queries(self, message: str, docs: list[Any]) -> list[str]:
+        """构建 WHO 查询候选词列表。"""
         candidates: list[str] = []
         self._push_query_candidate(candidates, message)
         self._push_query_candidate(candidates, self._strip_question_tail(message))
@@ -500,6 +553,7 @@ class ReactAgentService:
         return candidates
 
     def _push_query_candidate(self, candidates: list[str], query: str) -> None:
+        """把一个候选查询词清洗并去重后塞进列表。"""
         normalized = self._normalize_query(query)
         if normalized and normalized not in candidates:
             candidates.append(normalized)
@@ -510,6 +564,11 @@ class ReactAgentService:
         focus_items: list[dict[str, Any]],
         related_items: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[Citation]]:
+        """批量解释多个指标。
+
+        这里先命中本地知识，再用 fast 模型把这些知识整理成更适合后续消费的结构。
+        """
+        # 先查本地知识，再决定是否让 fast 模型做结构整理。
         explanations = knowledge_service.explain_lab_items(session, [str(item["name"]) for item in focus_items])
         citations = [Citation(source_type="knowledge_doc", doc_id=item["doc_id"], title=item["title"], url=item["url"], trust_tier=item["trust_tier"], snippet=item["snippet"]) for item in explanations]
         if llm_service.is_configured and explanations:
@@ -550,6 +609,14 @@ class ReactAgentService:
         used_tools: list[str],
         use_max: bool,
     ) -> str:
+        """组织最终答案。
+
+        报告问题优先从本地结构化素材拼草稿，再视情况让 max 模型润色；
+        这样可以显著降低“模型只输出几个标题”的概率。
+        """
+        # 不同意图的最终组织方式不同，报告类问题和术语类问题不会共用完全相同的策略。
+        # 报告类回答如果已经有本地结构化草稿，优先直接用它，
+        # 不必把“是否完整”这件事完全交给大模型碰运气。
         if intent == "report_follow_up":
             draft = self._build_report_follow_up_answer(tool_outputs)
             if llm_service.is_configured and use_max and draft:
@@ -587,11 +654,13 @@ class ReactAgentService:
         return self._fallback_answer(intent, tool_outputs, citations, used_tools)
 
     def _extract_report_debug_materials(self, tool_outputs: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """从工具输出中抽取 plan 和 synthesis，供调试或润色阶段使用。"""
         plan = next((item["result"] for item in tool_outputs if item["tool"] == "report_follow_up_plan"), {})
         synthesis = next((item["result"] for item in tool_outputs if item["tool"] == "report_synthesis"), {})
         return (plan if isinstance(plan, dict) else {}, synthesis if isinstance(synthesis, dict) else {})
 
     def _build_report_follow_up_answer(self, tool_outputs: list[dict[str, Any]]) -> str:
+        """把报告解释素材直接组装成一版完整可用的答案。"""
         lab_result = next((item["result"] for item in tool_outputs if item["tool"] == "interpret_lab"), {})
         synthesis_result = next((item["result"] for item in tool_outputs if item["tool"] == "report_synthesis"), {})
         items = lab_result.get("items", []) if isinstance(lab_result, dict) else []
@@ -629,6 +698,7 @@ class ReactAgentService:
         return "\n".join(lines).strip()
 
     def _analyze_input(self, message: str, has_report: bool, conversation_history: list[dict[str, str]]) -> InputAnalysisResult:
+        """输入分析：先判断是什么问题、该怎么改写、需不需要 WHO / max。"""
         rule_intent = routing_service.route(message, has_report)
         stripped = self._strip_question_tail(message)
         history = conversation_history if rule_intent != "report_follow_up" else ([] if self._should_ignore_report_history(message) else conversation_history[-4:])
@@ -661,6 +731,7 @@ class ReactAgentService:
             return fallback
 
     def _answer_system_prompt(self, intent: str) -> str:
+        """根据意图选择最终回答阶段要使用的 system prompt。"""
         return term_explanation_system_prompt() if intent == "term_explanation" else answer_composer_system_prompt()
 
     def _repair_incomplete_answer(
@@ -672,6 +743,7 @@ class ReactAgentService:
         citations: list[Citation],
         used_tools: list[str],
     ) -> str:
+        """当模型输出半成品时，尝试再修一轮。"""
         if intent == "report_follow_up":
             return self._build_report_follow_up_answer(tool_outputs)
         if llm_service.is_configured and partial_answer:
@@ -693,6 +765,7 @@ class ReactAgentService:
         return self._fallback_answer(intent, tool_outputs, citations, used_tools)
 
     def _fallback_answer(self, intent: str, tool_outputs: list[dict[str, Any]], citations: list[Citation], used_tools: list[str]) -> str:
+        """最后的本地兜底。目标不是最优雅，而是保证结果完整可读。"""
         if intent == "collect_more_info":
             return "目前信息还不够，我需要先补充几个关键点，才能更准确地解释。"
         if intent == "report_follow_up":
@@ -708,6 +781,9 @@ class ReactAgentService:
         return "当前本地知识库里没有找到足够相关的内容，建议你补充更具体的问题描述。"
 
     def _fallback_term_explanation(self, tool_outputs: list[dict[str, Any]], used_tools: list[str]) -> str:
+        """术语解释链的本地兜底版本。"""
+        # 这里会尽量利用已经查到的 WHO / 本地知识结果手工拼接答案，
+        # 避免在模型不可用时完全失去术语解释能力。
         who_matches: list[dict[str, Any]] = []
         docs: list[dict[str, Any]] = []
         for item in tool_outputs:
@@ -778,12 +854,14 @@ class ReactAgentService:
         ])
 
     def _append_source_marker(self, intent: str, used_tools: list[str], answer: str) -> str:
+        """在需要时给术语解释追加 WHO 来源标记。"""
         normalized = answer.strip()
         if intent == "term_explanation" and "lookup_icd11" in used_tools and WHO_SOURCE_SUFFIX not in normalized:
             normalized = f"{normalized}\n\n{WHO_SOURCE_SUFFIX}"
         return normalized
 
     def _build_agent_response(self, session_id: str, execution: AgentExecutionResult) -> AgentResponse:
+        """把内部执行结果转换成 API 返回结构。"""
         return AgentResponse(
             session_id=session_id,
             intent=execution.intent,  # type: ignore[arg-type]
@@ -797,16 +875,23 @@ class ReactAgentService:
         )
 
     def _with_safety_appendix(self, answer: str) -> str:
+        """给最终答案追加统一安全提示，并避免重复追加。"""
         stripped = self._strip_duplicate_appendix(answer)
         return f"{stripped}\n\n{DEFAULT_SAFETY_APPENDIX}" if stripped else DEFAULT_SAFETY_APPENDIX
 
     def _strip_duplicate_appendix(self, answer: str) -> str:
+        """移除已经重复出现的默认安全提示。"""
         cleaned = answer.strip()
         while DEFAULT_SAFETY_APPENDIX in cleaned:
             cleaned = cleaned.replace(DEFAULT_SAFETY_APPENDIX, "").strip()
         return cleaned
 
     def _is_incomplete_answer(self, answer: str) -> bool:
+        """识别明显的半成品回答。"""
+        # 这里专门拦截常见失败模式：
+        # - 只有标题没有正文
+        # - 以“包括：”“如下：”等开放式短句结尾
+        # - 内容太少但标题很多
         text = self._strip_duplicate_appendix(answer).strip()
         if not text:
             return True
@@ -827,10 +912,12 @@ class ReactAgentService:
         return len(content_lines) <= 1 and any(line in known_headings for line in normalized_lines)
 
     def _normalize_heading_line(self, line: str) -> str:
+        """把标题行去掉序号、Markdown 符号和结尾冒号。"""
         stripped = HEADING_PREFIX_PATTERN.sub("", line.strip())
         return stripped.strip(":： ").replace("**", "")
 
     def _default_follow_up_questions(self, intent: str) -> list[str]:
+        """给不同意图准备一条默认追问建议。"""
         if intent == "report_follow_up":
             return ["如果你愿意，我可以继续解释某一项异常指标为什么值得关注。"]
         if intent == "term_explanation":
@@ -840,6 +927,7 @@ class ReactAgentService:
         return []
 
     def _report_follow_up_questions(self, plan: ReportFollowUpPlan) -> list[str]:
+        """根据报告追问计划动态生成下一轮建议问题。"""
         if plan.follow_up_needed:
             return ["如果方便，请告诉我你最担心的是哪一项指标，或者是否有近期不适和复查结果。"]
         if plan.need_next_steps:
@@ -847,24 +935,29 @@ class ReactAgentService:
         return self._default_follow_up_questions("report_follow_up")
 
     def _cache_key(self, session_id: str, report_id: str | None, message: str) -> str:
+        """生成回答缓存键。"""
         normalized = re.sub(r"\s+", " ", message.strip())
         return f"{session_id}::{report_id or '-'}::{normalized}"
 
     def _strip_question_tail(self, message: str) -> str:
+        """去掉问题尾部的口语化短语，便于检索和标准化。"""
         stripped = message.strip().rstrip("：:。？！!?")
         stripped = QUESTION_TAIL_PATTERN.sub("", stripped).strip()
         return stripped or message.strip()
 
     def _normalize_query(self, query: str) -> str:
+        """对任意查询词做轻量清洗。"""
         return re.sub(r"\s+", " ", query.strip("：:。？！!? ")).strip()
 
     def _should_ignore_report_history(self, message: str) -> bool:
+        """判断这轮报告问题是否应该弱化历史上下文影响。"""
         text = message.strip()
         broad_keywords = ("报告", "体检", "指标", "结果", "分析", "异常")
         follow_keywords = ("这个", "那个", "这项", "那项", "它", "前一个", "上一个", "刚才")
         return any(keyword in text for keyword in broad_keywords) and not any(keyword in text for keyword in follow_keywords)
 
     def _chunk_text(self, text: str) -> list[str]:
+        """把最终答案按段落切块，供流式输出使用。"""
         normalized = text.strip()
         if not normalized:
             return []
@@ -874,6 +967,7 @@ class ReactAgentService:
         return [part + ("\n\n" if index < len(parts) - 1 else "") for index, part in enumerate(parts)]
 
     def _tool_status_label(self, tool: str) -> str:
+        """把内部工具名转换成前端可读的阶段说明。"""
         return {
             "search_report_items": "读取报告内容中",
             "interpret_lab": "解释异常指标中",
@@ -883,6 +977,7 @@ class ReactAgentService:
         }.get(tool, f"执行工具中：{tool}")
 
     def _recent_conversation_context(self, session: Session, session_id: str) -> list[dict[str, str]]:
+        """读取最近 N 条对话，作为短期上下文。"""
         limit = self.settings.short_term_context_turns * 2 + 1
         messages = session.exec(
             select(ChatMessage)
@@ -894,6 +989,9 @@ class ReactAgentService:
         return [{"role": message.role, "content": message.content} for message in messages]
 
     def _get_or_create_session(self, session: Session, session_id: str | None, report_id: str | None, message: str) -> ChatSession:
+        """优先复用已有会话，否则新建一段会话。"""
+        # 会话是多轮上下文的载体。
+        # 没有 session_id 时就新建；有 session_id 时优先复用。
         if session_id:
             existing = session.get(ChatSession, session_id)
             if existing:
@@ -914,6 +1012,8 @@ class ReactAgentService:
         safety_level: str = "safe",
         citations: list[Citation] | None = None,
     ) -> None:
+        """把一条用户或助手消息持久化到数据库。"""
+        # 这里不只是存纯文本，还会把意图、安全等级和 citations 一起落库。
         message = ChatMessage(
             session_id=session_id,
             role=role,
@@ -926,6 +1026,7 @@ class ReactAgentService:
         session.commit()
 
     def _knowledge_citations(self, docs: list[Any]) -> list[Citation]:
+        """把知识文档对象转换成标准 Citation 列表。"""
         return [
             Citation(
                 source_type="knowledge_doc",
@@ -939,6 +1040,7 @@ class ReactAgentService:
         ]
 
     def _who_citations(self, who_result: dict[str, Any]) -> list[Citation]:
+        """把 WHO 查询结果转换成 Citation 列表。"""
         citations: list[Citation] = []
         for match in who_result.get("matches", []):
             identifier = str(match.get("code") or match.get("uri") or match.get("title") or "who")
@@ -955,6 +1057,7 @@ class ReactAgentService:
         return citations
 
     def _dedupe_citations(self, citations: list[Citation]) -> list[Citation]:
+        """按来源类型 + 文档 id + 标题去重引用。"""
         deduped: list[Citation] = []
         seen: set[tuple[str, str, str]] = set()
         for citation in citations:

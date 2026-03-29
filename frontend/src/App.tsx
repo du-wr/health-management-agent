@@ -13,12 +13,15 @@ type MessageRow = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  // meta 只在助手消息里出现，用来挂接 Agent 返回的结构化信息，
+  // 例如 intent / used_tools / citations / debug。
   meta?: AgentResponse;
   statusLabel?: string | null;
   streaming?: boolean;
 };
 
 function renderInline(text: string): ReactNode[] {
+  // 这里只做了最轻量的富文本支持：处理 **加粗**。
   const parts = text.split(/(\*\*.*?\*\*)/g).filter(Boolean);
   return parts.map((part, index) => {
     const match = /^\*\*(.*?)\*\*$/.exec(part);
@@ -34,6 +37,7 @@ function renderParagraph(text: string, className?: string): ReactNode {
 }
 
 function renderMessageContent(content: string): ReactNode {
+  // 这不是完整 Markdown 解析器，而是一个够用的简化版。
   const normalized = content.replace(/\r\n/g, "\n").trim();
   if (!normalized) {
     return null;
@@ -138,16 +142,24 @@ function reportStatusText(status: string): string {
 }
 
 export default function App() {
+  // report: 当前上传并正在分析/已分析完成的报告
   const [report, setReport] = useState<ReportParseResult | null>(null);
+  // reportProgress: 解析过程中的实时阶段和百分比
   const [reportProgress, setReportProgress] = useState<ReportProgressPayload | null>(null);
+  // summary: 最终生成的小结 Markdown + PDF
   const [summary, setSummary] = useState<SummaryArtifact | null>(null);
+  // messages: 对话区的完整消息列表
   const [messages, setMessages] = useState<MessageRow[]>([]);
+  // sessionId: 后端会话 id，用来把多轮对话串起来
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
+  // busy: 当前页面正在执行什么操作，用于禁用按钮和显示处理中状态
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // EventSource 需要在重新订阅或组件卸载时关闭，否则会残留旧连接。
   const closeReportStreamRef = useRef<(() => void) | null>(null);
 
+  // 报告只有在解析完成或需要人工复核时，才允许继续围绕它提问或生成小结。
   const reportReady = report ? ["parsed", "needs_review"].includes(report.parse_status) : true;
 
   useEffect(() => {
@@ -158,6 +170,7 @@ export default function App() {
   }, []);
 
   function subscribeReportProgress(reportId: string) {
+    // 同一时刻只保留一条报告进度流，避免切换报告后多个 EventSource 同时更新 UI。
     closeReportStreamRef.current?.();
     closeReportStreamRef.current = streamReportProgress(reportId, (event) => {
       if (event.event === "progress") {
@@ -192,6 +205,10 @@ export default function App() {
   }
 
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
+    // 上传流程：
+    // 1. 上传文件
+    // 2. 拿到 report_id
+    // 3. 立刻订阅后台解析进度
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const file = form.get("report") as File | null;
@@ -224,6 +241,10 @@ export default function App() {
   }
 
   async function handleChat(event: FormEvent<HTMLFormElement>) {
+    // 聊天发送时，会先插入：
+    // - 一条用户消息
+    // - 一条空的助手占位消息
+    // 然后随着 SSE delta 不断往助手消息里追加内容。
     event.preventDefault();
     if (!prompt.trim()) {
       return;
@@ -249,12 +270,15 @@ export default function App() {
         },
         (event) => {
           if (event.event === "session") {
+            // 后端第一次返回 session_id 时，前端要记住它，
+            // 后续追问才能共享同一段短期上下文。
             const data = getStreamEventData<{ session_id: string }>(event);
             setSessionId(data.session_id);
             return;
           }
 
           if (event.event === "status") {
+            // status 不是正文，而是“当前 Agent 处理到哪一步了”。
             const data = getStreamEventData<{ label: string }>(event);
             setMessages((prev) =>
               prev.map((item) => (item.id === assistantId ? { ...item, statusLabel: data.label, streaming: true } : item)),
@@ -263,6 +287,7 @@ export default function App() {
           }
 
           if (event.event === "delta") {
+            // delta 是流式正文增量，直接拼接到当前助手消息尾部。
             const data = getStreamEventData<{ text: string }>(event);
             setMessages((prev) =>
               prev.map((item) =>
@@ -275,6 +300,8 @@ export default function App() {
           }
 
           if (event.event === "final") {
+            // final 是最终结构化结果，会覆盖流式草稿，
+            // 同时补上 meta / debug / citations 等信息。
             const data = getStreamEventData<AgentResponse>(event);
             setSessionId(data.session_id);
             setMessages((prev) =>
@@ -306,6 +333,9 @@ export default function App() {
   }
 
   async function handleGenerateSummary() {
+    // 小结生成依赖两样东西：
+    // 1. 已有报告
+    // 2. 一个稳定的 session_id
     if (!report) {
       setError("请先上传报告，再生成健康小结。");
       return;
@@ -414,6 +444,7 @@ export default function App() {
               <div className={`message ${message.role}`} key={message.id}>
                 {message.role === "assistant" ? (
                   <div className="message-body rich">
+                    {/* 助手消息支持轻量富文本渲染，便于阅读结构化回答。 */}
                     {renderMessageContent(message.content)}
                     {message.streaming ? (
                       <div className="typing-line" aria-live="polite">

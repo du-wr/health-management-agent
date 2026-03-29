@@ -27,7 +27,10 @@ LAB_LINE_PATTERN = re.compile(
 
 
 class ReportService:
+    """处理体检报告上传、文本提取、结构化抽取和异常判断。"""
+
     async def create_upload(self, session: Session, file: UploadFile, upload_dir: Path) -> ReportParseResult:
+        """保存上传文件，并创建一条“处理中”的报告记录。"""
         suffix = Path(file.filename or "upload.bin").suffix or ".bin"
         file_name = file.filename or f"report{suffix}"
         storage_name = f"{uuid4()}{suffix}"
@@ -47,10 +50,12 @@ class ReportService:
         return self._build_report_result(report, [])
 
     def process_report(self, report_id: str) -> None:
+        """后台任务入口：新开一个数据库会话完成整份报告解析。"""
         with Session(engine) as session:
             self.process_report_with_session(session, report_id)
 
     def process_report_with_session(self, session: Session, report_id: str) -> None:
+        """真正的报告处理主流程。"""
         report = session.get(Report, report_id)
         if not report:
             return
@@ -84,6 +89,7 @@ class ReportService:
                 progress=90,
                 parse_status=report.parse_status,
             )
+            # 每次重新解析都会覆盖旧的指标，避免同一份报告重复累积旧数据。
             session.exec(delete(LabItem).where(LabItem.report_id == report.id))
             for item in items:
                 session.add(
@@ -113,6 +119,7 @@ class ReportService:
             report_progress_service.mark_failed(report.id, error=str(exc))
 
     def get_report(self, session: Session, report_id: str) -> ReportParseResult:
+        """返回单份报告及其所有结构化指标。"""
         report = session.get(Report, report_id)
         if not report:
             raise ValueError("Report not found.")
@@ -121,6 +128,13 @@ class ReportService:
         return self._build_report_result(report, items)
 
     def extract_text(self, path: Path, report_id: str | None = None) -> tuple[str, list[str]]:
+        """从文件中提取文本。
+
+        处理策略：
+        - 文本型 PDF：优先 pdfplumber
+        - 图片：如果配置了视觉模型，就走 OCR
+        - 提取失败：返回 warning，由上层决定如何展示
+        """
         warnings: list[str] = []
         if path.suffix.lower() == ".pdf":
             if report_id:
@@ -140,6 +154,7 @@ class ReportService:
                 warnings.append(f"PDF parse failed: {exc}")
             raw_text = "\n".join(chunk for chunk in text_chunks if chunk).strip()
             if len(raw_text) >= 40:
+                # 长度太短时通常说明 PDF 更像扫描件，而不是真正的文本 PDF。
                 return raw_text, warnings
             warnings.append("PDF text was too short. Configure OCR for scanned reports.")
             if report_id:
@@ -179,6 +194,7 @@ class ReportService:
         return "", warnings
 
     def extract_lab_items(self, raw_text: str) -> list[LabItemSchema]:
+        """把原始文本转成结构化指标列表。"""
         if not raw_text:
             return []
 
@@ -203,6 +219,7 @@ class ReportService:
                 if items:
                     return items
             except Exception:
+                # 结构化抽取失败时不要中断整条链，直接退回正则兜底。
                 pass
 
         items: list[LabItemSchema] = []
@@ -223,6 +240,7 @@ class ReportService:
         return items
 
     def _build_report_result(self, report: Report, items: list[LabItem | LabItemSchema]) -> ReportParseResult:
+        """把 ORM 对象转换成前端真正消费的 schema。"""
         schema_items: list[LabItemSchema] = []
         for item in items:
             if isinstance(item, LabItemSchema):
@@ -260,6 +278,7 @@ class ReportService:
         reference_range: str,
         clinical_note: str | None,
     ) -> LabItemSchema | None:
+        """对单个指标做最后清洗，并计算 high / low / normal 状态。"""
         if not name or not value_raw:
             return None
 
@@ -283,6 +302,10 @@ class ReportService:
         )
 
     def _determine_status(self, value_num: float | None, reference_range: str) -> str:
+        """根据参考范围做规则判断。
+
+        这一步故意不用大模型，因为高低判断是确定性逻辑。
+        """
         if value_num is None or not reference_range:
             return "unknown"
 
