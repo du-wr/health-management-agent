@@ -5,7 +5,9 @@ import type {
   SummaryArtifact,
 } from "./types";
 
-const API_BASE = "http://localhost:8000/api";
+// 本地开发时默认直连 8000 端口；
+// Docker / 生产构建时可以通过 VITE_API_BASE 覆盖成 /api。
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000/api";
 
 async function unwrap<T>(response: Response): Promise<T> {
   // 普通 JSON 接口统一在这里做错误处理，避免每个 API 都重复写样板代码。

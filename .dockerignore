@@ -1,0 +1,7 @@
+.git/
+.idea/
+backend/.pytest_cache/
+backend/medical_agent.egg-info/
+frontend/node_modules/
+frontend/dist/
+data/output/pdf/
