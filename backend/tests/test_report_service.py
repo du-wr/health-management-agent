@@ -27,11 +27,11 @@ def test_determine_status_single_bound() -> None:
     assert report_service._determine_status(30.0, ">= 40") == "low"
 
 
-def test_create_upload_returns_processing_status(tmp_path: Path) -> None:
+def test_create_upload_returns_queued_status(tmp_path: Path) -> None:
     with make_session() as session:
         upload = UploadFile(filename="report.pdf", file=BytesIO(b"dummy"))
         result = asyncio.run(report_service.create_upload(session, upload, tmp_path))
-        assert result.parse_status == "processing"
+        assert result.parse_status == "queued"
         assert result.items == []
         progress = report_progress_service.get_state(result.report_id)
         assert progress is not None

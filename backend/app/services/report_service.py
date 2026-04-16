@@ -40,7 +40,7 @@ class ReportService:
         report = Report(
             file_name=file_name,
             file_path=str(saved_path),
-            parse_status="processing",
+            parse_status="queued",
             parse_warnings_json="[]",
         )
         session.add(report)

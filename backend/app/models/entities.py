@@ -22,6 +22,33 @@ class Report(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ReportParseTask(SQLModel, table=True):
+    """报告解析任务表。"""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    report_id: str = Field(index=True)
+    task_type: str = "report_parse"
+    status: str = Field(default="queued", index=True)
+    attempts: int = 0
+    max_attempts: int = 3
+    leased_until: datetime | None = Field(default=None, index=True)
+    last_error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class AgentAnswerCache(SQLModel, table=True):
+    """Agent 最终回答的持久化缓存。"""
+
+    cache_key: str = Field(primary_key=True)
+    report_id: str | None = Field(default=None, index=True)
+    normalized_message: str = ""
+    response_json: str
+    answer_text: str
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+    expires_at: datetime = Field(index=True)
+
+
 class LabItem(SQLModel, table=True):
     """报告里的单个结构化指标。"""
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)

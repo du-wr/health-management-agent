@@ -2,9 +2,9 @@ import json
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.core.config import get_settings
 from app.core.database import engine, get_session
@@ -14,6 +14,11 @@ from app.core.schemas import (
     KnowledgeDoc,
     KnowledgeSourcesResponse,
     ReportParseResult,
+    SessionCreateRequest,
+    SessionDetail,
+    SessionMessage,
+    SessionRenameRequest,
+    SessionSummary,
     SummaryArtifact,
     SummaryRequest,
 )
@@ -21,7 +26,9 @@ from app.models.entities import SummaryArtifact as SummaryArtifactEntity
 from app.services.knowledge_service import knowledge_service
 from app.services.react_agent import react_agent_service
 from app.services.report_progress_service import report_progress_service
+from app.services.report_queue_service import report_queue_service
 from app.services.report_service import report_service
+from app.services.session_service import session_service
 from app.services.summary_service import summary_service
 
 
@@ -44,16 +51,139 @@ def _format_sse(event: str, data: object) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+@router.get("/sessions", response_model=list[SessionSummary])
+def list_sessions(session: Session = Depends(get_session)) -> list[SessionSummary]:
+    """返回左侧边栏需要的会话列表。"""
+    return session_service.list_sessions(session)
+
+
+@router.post("/sessions", response_model=SessionSummary)
+def create_session(
+    request: SessionCreateRequest,
+    session: Session = Depends(get_session),
+) -> SessionSummary:
+    """创建一个新的空白会话。"""
+    try:
+        return session_service.create_session(session, request.title)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}", response_model=SessionDetail)
+def get_session_detail(session_id: str, session: Session = Depends(get_session)) -> SessionDetail:
+    """读取单个会话的概览信息。"""
+    try:
+        return session_service.get_session_detail(session, session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionDetail)
+def rename_session(
+    session_id: str,
+    request: SessionRenameRequest,
+    session: Session = Depends(get_session),
+) -> SessionDetail:
+    """修改会话标题。"""
+    try:
+        return session_service.rename_session(session, session_id, request.title)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str, session: Session = Depends(get_session)) -> dict[str, str]:
+    """删除指定会话，并清理该会话关联的消息和健康小结。"""
+    try:
+        session_service.delete_session(session, session_id)
+        return {"session_id": session_id, "status": "deleted"}
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}/messages", response_model=list[SessionMessage])
+def get_session_messages(session_id: str, session: Session = Depends(get_session)) -> list[SessionMessage]:
+    """返回一个会话下的历史消息列表。"""
+    try:
+        return session_service.list_messages(session, session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}/summaries/latest", response_model=SummaryArtifact)
+def get_latest_summary(session_id: str, session: Session = Depends(get_session)) -> SummaryArtifact:
+    """返回当前会话最新一份健康小结。"""
+    try:
+        session_service.get_session_entity(session, session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    artifact = session.exec(
+        select(SummaryArtifactEntity)
+        .where(SummaryArtifactEntity.session_id == session_id)
+        .order_by(SummaryArtifactEntity.created_at.desc())
+    ).first()
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Summary not found.")
+    return SummaryArtifact(
+        summary_id=artifact.id,
+        markdown=artifact.markdown,
+        pdf_path=artifact.pdf_path,
+        created_at=artifact.created_at,
+    )
+
+
+@router.get("/sessions/{session_id}/summaries", response_model=list[SummaryArtifact])
+def list_session_summaries(session_id: str, session: Session = Depends(get_session)) -> list[SummaryArtifact]:
+    """返回当前会话下全部健康小结，供前端展示历史列表。"""
+    try:
+        session_service.get_session_entity(session, session_id)
+        return summary_service.list_for_session(session, session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/sessions/{session_id}/reports", response_model=ReportParseResult)
+async def upload_report_for_session(
+    session_id: str,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+) -> ReportParseResult:
+    """给当前会话上传并绑定一份报告。"""
+    try:
+        result = await report_service.create_upload(session, file, settings.upload_path)
+        session_service.bind_report(session, session_id, result.report_id)
+        report_queue_service.enqueue_report(session, result.report_id)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/sessions/{session_id}/summaries/generate", response_model=SummaryArtifact)
+def generate_summary_for_session(
+    session_id: str,
+    session: Session = Depends(get_session),
+) -> SummaryArtifact:
+    """基于当前会话上下文生成健康小结。"""
+    try:
+        return summary_service.generate_for_session(
+            session=session,
+            session_id=session_id,
+            output_dir=settings.output_path,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/reports/upload", response_model=ReportParseResult)
 async def upload_report(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
 ) -> ReportParseResult:
     """上传报告并启动后台解析。"""
     try:
         result = await report_service.create_upload(session, file, settings.upload_path)
-        background_tasks.add_task(report_service.process_report, result.report_id)
+        report_queue_service.enqueue_report(session, result.report_id)
         return result
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -11,6 +11,17 @@ services:
       - "8000:8000"
     restart: unless-stopped
 
+  worker:
+    build:
+      context: ./backend
+    container_name: medical-agent-worker
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend

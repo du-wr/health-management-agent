@@ -2,11 +2,12 @@ import type {
   ChatStreamEvent,
   KnowledgeSourcesResponse,
   ReportParseResult,
+  SessionDetail,
+  SessionMessage,
+  SessionSummary,
   SummaryArtifact,
 } from "./types";
 
-// 本地开发时默认直连 8000 端口；
-// Docker / 生产构建时可以通过 VITE_API_BASE 覆盖成 /api。
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000/api";
 
 async function unwrap<T>(response: Response): Promise<T> {
@@ -19,8 +20,7 @@ async function unwrap<T>(response: Response): Promise<T> {
 }
 
 function parseSseBlock(rawEvent: string): ChatStreamEvent | null {
-  // 后端返回的是标准 SSE 文本块，这里负责把一段原始文本拆成
-  // `{ event, data }` 这种前端更容易消费的对象。
+  // 后端返回的是标准 SSE 文本块，这里将其转换为前端更容易消费的结构。
   const lines = rawEvent.split("\n").filter(Boolean);
   let eventName = "message";
   const dataLines: string[] = [];
@@ -44,10 +44,26 @@ function parseSseBlock(rawEvent: string): ChatStreamEvent | null {
 }
 
 export async function uploadReport(file: File): Promise<ReportParseResult> {
-  // 上传接口使用 multipart/form-data，因为浏览器文件上传最自然的方式就是 FormData。
+  // 通用上传接口保留给非会话场景使用。
   const formData = new FormData();
   formData.append("file", file);
   const response = await fetch(`${API_BASE}/reports/upload`, {
+    method: "POST",
+    body: formData,
+  });
+  return unwrap<ReportParseResult>(response);
+}
+
+export async function getReport(reportId: string): Promise<ReportParseResult> {
+  const response = await fetch(`${API_BASE}/reports/${reportId}`);
+  return unwrap<ReportParseResult>(response);
+}
+
+export async function uploadReportToSession(sessionId: string, file: File): Promise<ReportParseResult> {
+  // 会话化页面优先走这个接口，避免前端额外做“上传后再绑定”的二次调用。
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/reports`, {
     method: "POST",
     body: formData,
   });
@@ -62,8 +78,7 @@ export async function streamChat(
   },
   onEvent: (event: ChatStreamEvent) => void,
 ): Promise<void> {
-  // 这里没有使用 EventSource，是因为聊天接口是 POST，
-  // 而原生 EventSource 只支持 GET。于是改用 fetch + ReadableStream 手动解析 SSE。
+  // 聊天走 POST，所以用 fetch + ReadableStream 手动解析 SSE。
   const response = await fetch(`${API_BASE}/agent/chat/stream`, {
     method: "POST",
     headers: {
@@ -89,7 +104,6 @@ export async function streamChat(
     }
 
     buffer += decoder.decode(value, { stream: true });
-    // SSE 事件之间以空行分隔，因此这里不断查找 "\n\n" 边界。
     let boundaryIndex = buffer.indexOf("\n\n");
     while (boundaryIndex !== -1) {
       const rawEvent = buffer.slice(0, boundaryIndex);
@@ -104,11 +118,8 @@ export async function streamChat(
   }
 }
 
-export function streamReportProgress(
-  reportId: string,
-  onEvent: (event: ChatStreamEvent) => void,
-): () => void {
-  // 报告进度流是 GET，所以这里可以直接使用浏览器原生 EventSource。
+export function streamReportProgress(reportId: string, onEvent: (event: ChatStreamEvent) => void): () => void {
+  // 报告进度是 GET 场景，直接使用浏览器原生 EventSource 即可。
   const eventSource = new EventSource(`${API_BASE}/reports/${reportId}/stream`);
 
   eventSource.addEventListener("progress", (event) => {
@@ -141,7 +152,6 @@ export async function generateSummary(payload: {
   session_id: string;
   report_id: string;
 }): Promise<SummaryArtifact> {
-  // 小结生成是普通 POST，不需要流式。
   const response = await fetch(`${API_BASE}/summaries/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -150,8 +160,71 @@ export async function generateSummary(payload: {
   return unwrap<SummaryArtifact>(response);
 }
 
+export async function generateSummaryForSession(sessionId: string): Promise<SummaryArtifact> {
+  // 当前页面的小结由后端基于会话上下文自动收集材料并生成。
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/summaries/generate`, {
+    method: "POST",
+  });
+  return unwrap<SummaryArtifact>(response);
+}
+
+export async function getLatestSummary(sessionId: string): Promise<SummaryArtifact | null> {
+  // 切回历史会话时，如果此前已经生成过小结，就直接恢复最近一份。
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/summaries/latest`);
+  if (response.status === 404) {
+    return null;
+  }
+  return unwrap<SummaryArtifact>(response);
+}
+
+export async function getSessionSummaries(sessionId: string): Promise<SummaryArtifact[]> {
+  // 小结历史列表用于在弹窗内切换查看不同版本的小结内容。
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/summaries`);
+  return unwrap<SummaryArtifact[]>(response);
+}
+
+export async function listSessions(): Promise<SessionSummary[]> {
+  const response = await fetch(`${API_BASE}/sessions`);
+  return unwrap<SessionSummary[]>(response);
+}
+
+export async function createSession(title?: string): Promise<SessionSummary> {
+  const response = await fetch(`${API_BASE}/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: title ?? null }),
+  });
+  return unwrap<SessionSummary>(response);
+}
+
+export async function getSessionDetail(sessionId: string): Promise<SessionDetail> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`);
+  return unwrap<SessionDetail>(response);
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<SessionDetail> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  return unwrap<SessionDetail>(response);
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  // 删除会话时由后端一并清理该会话关联的历史消息和小结文件。
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+  await unwrap<{ session_id: string; status: string }>(response);
+}
+
+export async function getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/messages`);
+  return unwrap<SessionMessage[]>(response);
+}
+
 export async function getKnowledgeSources(): Promise<KnowledgeSourcesResponse> {
-  // 当前主页面不再直接展示知识库区块，但保留这个接口方便调试和扩展。
   const response = await fetch(`${API_BASE}/knowledge/sources`);
   return unwrap<KnowledgeSourcesResponse>(response);
 }

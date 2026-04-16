@@ -18,6 +18,49 @@ def make_session() -> Session:
     return Session(engine)
 
 
+def test_entry_graph_returns_analysis_for_normal_query(monkeypatch) -> None:
+    original_client = llm_service.client
+    llm_service.client = object()
+
+    monkeypatch.setattr(routing_service, "route", lambda message, has_report: "term_explanation")
+    monkeypatch.setattr(
+        llm_service,
+        "chat_json_fast",
+        lambda system_prompt, user_prompt: {
+            "intent": "term_explanation",
+            "rewritten_query": "低密度脂蛋白",
+            "normalized_term": "低密度脂蛋白",
+            "use_local_knowledge": True,
+            "use_who": False,
+            "use_max": True,
+            "reason": "graph_route",
+        },
+    )
+
+    try:
+        with make_session() as session:
+            chat_session = ChatSession(title="graph-entry")
+            session.add(chat_session)
+            session.commit()
+            session.refresh(chat_session)
+
+            entry = react_agent_service._run_entry_graph(
+                session=session,
+                session_id=chat_session.id,
+                report_id=None,
+                message="解释一下低密度脂蛋白",
+            )
+
+        assert entry.immediate_response is None
+        assert entry.analysis is not None
+        assert entry.analysis.intent == "term_explanation"
+        assert entry.analysis.reason == "graph_route"
+        assert entry.execution is not None
+        assert entry.execution.intent == "term_explanation"
+    finally:
+        llm_service.client = original_client
+
+
 def test_react_agent_report_follow_up_uses_fast_path_tools() -> None:
     with make_session() as session:
         knowledge_service.seed_local_knowledge(session)
@@ -555,6 +598,37 @@ def test_react_agent_uses_fast_and_max_models(monkeypatch) -> None:
         llm_service.client = original_client
 
 
+def test_stream_respond_emits_incremental_deltas_before_final(monkeypatch) -> None:
+    original_client = llm_service.client
+    llm_service.client = object()
+
+    monkeypatch.setattr(routing_service, "route", lambda message, has_report: "term_explanation")
+    monkeypatch.setattr(llm_service, "chat_text_stream_max", lambda system_prompt, user_prompt: iter(["Streaming ", "answer"]))
+
+    try:
+        with make_session() as session:
+            knowledge_service.seed_local_knowledge(session)
+            events = list(
+                react_agent_service.stream_respond(
+                    session=session,
+                    session_id=None,
+                    report_id=None,
+                    message="explain ldl",
+                    output_dir=Path("."),
+                )
+            )
+
+        delta_events = [event for event in events if event["event"] == "delta"]
+        final_index = next(index for index, event in enumerate(events) if event["event"] == "final")
+
+        assert [event["data"]["text"] for event in delta_events] == ["Streaming ", "answer"]
+        assert delta_events
+        assert events.index(delta_events[-1]) < final_index
+        assert next(event for event in events if event["event"] == "final")["data"]["answer"].startswith("Streaming answer")
+    finally:
+        llm_service.client = original_client
+
+
 def test_term_explanation_incomplete_answer_falls_back(monkeypatch) -> None:
     original_client = llm_service.client
     llm_service.client = object()
@@ -760,5 +834,56 @@ def test_safety_appendix_is_not_duplicated(monkeypatch) -> None:
             )
 
         assert response.answer.count(DEFAULT_SAFETY_APPENDIX) == 1
+    finally:
+        llm_service.client = original_client
+
+
+def test_agent_response_can_hit_persistent_cache(monkeypatch) -> None:
+    calls = {"fast": 0, "max": 0}
+    original_client = llm_service.client
+    llm_service.client = object()
+
+    def fake_chat_json_fast(system_prompt: str, user_prompt: str) -> dict[str, str]:
+        calls["fast"] += 1
+        return {
+            "intent": "term_explanation",
+            "rewritten_query": "低密度脂蛋白是什么意思",
+            "normalized_term": "低密度脂蛋白胆固醇",
+            "use_local_knowledge": True,
+            "use_who": False,
+            "use_max": True,
+            "reason": "term_explanation",
+        }
+
+    def fake_chat_text_max(system_prompt: str, user_prompt: str) -> str:
+        calls["max"] += 1
+        return "### 它是什么\n低密度脂蛋白胆固醇是常见血脂指标。\n\n### 温馨提示\n建议结合体检结果综合判断。"
+
+    monkeypatch.setattr(llm_service, "chat_json_fast", fake_chat_json_fast)
+    monkeypatch.setattr(llm_service, "chat_text_max", fake_chat_text_max)
+
+    try:
+        with make_session() as session:
+            knowledge_service.seed_local_knowledge(session)
+            first = react_agent_service.respond(
+                session=session,
+                session_id=None,
+                report_id=None,
+                message="低密度脂蛋白是什么意思",
+                output_dir=Path("."),
+            )
+
+            react_agent_service.answer_cache.clear()
+
+            second = react_agent_service.respond(
+                session=session,
+                session_id=first.session_id,
+                report_id=None,
+                message="低密度脂蛋白是什么意思",
+                output_dir=Path("."),
+            )
+
+        assert first.answer == second.answer
+        assert calls["max"] == 1
     finally:
         llm_service.client = original_client

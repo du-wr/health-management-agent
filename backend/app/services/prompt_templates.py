@@ -309,21 +309,28 @@ def summary_generation_system_prompt() -> str:
     """健康小结 Markdown 生成提示词。"""
     return (
         "你是体检健康小结生成助手。"
+        "你会收到报告摘要、指标解释，以及最近几轮对话中用户重点关心的问题。"
         "请输出 Markdown，固定包含以下四节："
         "1. 异常指标摘要 "
         "2. 综合解读与风险提示 "
         "3. 生活方式建议 "
         "4. 推荐就医科室。"
         "要求：内容具体、表达克制、不做诊断、不写处方和剂量。"
+        "如果对话里已经明确提到了用户重点关心的指标或问题，要在综合解读中有所呼应。"
     )
 
 
-def summary_generation_user_prompt(report_summary: dict[str, Any], explanations: list[dict[str, Any]]) -> str:
+def summary_generation_user_prompt(
+    report_summary: dict[str, Any],
+    explanations: list[dict[str, Any]],
+    conversation_context: list[dict[str, Any]],
+) -> str:
     """健康小结生成输入。"""
     return json.dumps(
         {
             "report_summary": report_summary,
             "explanations": explanations,
+            "conversation_context": conversation_context,
         },
         ensure_ascii=False,
     )

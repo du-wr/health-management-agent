@@ -9,9 +9,11 @@ from typing import Any, Iterator
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
+from app.agent_graph.graph import build_entry_graph
 from app.core.config import get_settings
 from app.core.schemas import AgentDebug, AgentResponse, Citation
 from app.models.entities import ChatMessage, ChatSession
+from app.services.cache_service import cache_service
 from app.services.knowledge_service import knowledge_service
 from app.services.llm import llm_service
 from app.services.prompt_templates import (
@@ -34,6 +36,7 @@ from app.services.prompt_templates import (
 from app.services.report_service import report_service
 from app.services.routing_service import routing_service
 from app.services.safety_service import DEFAULT_SAFETY_APPENDIX, safety_service
+from app.services.session_service import session_service
 from app.services.who_service import who_service
 
 
@@ -106,6 +109,18 @@ class ReportSynthesisResult(BaseModel):
     next_steps: list[str] = Field(default_factory=list)
 
 
+class AgentEntryResult(BaseModel):
+    """LangGraph 鍏ュ彛鍥剧殑绠€鍖栬緭鍑恒€?
+    杩欏眰鍙礋璐ｆ槸鍚﹂渶瑕佺珛鍗崇粨鏉熶互鍙婅繖杞殑鎰忓浘鍒嗘祦锛?
+    鍥炵瓟鐢熸垚銆佺紦瀛樺拰钀藉簱浠嶇劧娌跨敤鍘熸湁閫昏緫锛岄伩鍏嶄竴娆℃€ф敼鍔ㄨ繃澶с€?
+    """
+
+    conversation_history: list[dict[str, str]] = Field(default_factory=list)
+    analysis: InputAnalysisResult | None = None
+    immediate_response: AgentResponse | None = None
+    execution: AgentExecutionResult | None = None
+
+
 class ReactAgentService:
     """整个健康咨询 Agent 的主协调器。"""
 
@@ -114,6 +129,8 @@ class ReactAgentService:
         self.settings = get_settings()
         # 简单内存缓存：避免同一问题在短时间内重复走整条 Agent 链。
         self.answer_cache: dict[str, AgentExecutionResult] = {}
+
+        self.entry_graph = build_entry_graph(self)
 
     def respond(
         self,
@@ -136,23 +153,40 @@ class ReactAgentService:
         # 流式接口和同步接口使用同一条业务链，只是输出方式不同。
         # 这里会把执行过程拆成 session / status / delta / final 四类事件。
         chat_session = self._get_or_create_session(session, session_id, report_id, message)
+        # 如果这是一个空白新会话的首轮提问，就把标题自动改成问题摘要，
+        # 这样左侧会话列表不会永远显示“新对话”。
+        session_service.auto_title_if_needed(session, chat_session.id, message)
         self._store_message(session, chat_session.id, "user", message)
-        immediate = self._handle_immediate_response(session, chat_session.id, report_id, message)
-        if immediate:
+        # 鍏ュ彛鍥惧厛鍋氫笂涓嬫枃鍔犺浇銆佸畨鍏ㄦ妤€鏌ャ€佹姤鍛婄姸鎬佸垽鏂拰鎰忓浘鍒嗘祦銆?
+        entry_result = self._run_entry_graph(session, chat_session.id, report_id, message)
+        if entry_result.immediate_response:
             self._store_message(
                 session,
                 chat_session.id,
                 "assistant",
-                immediate.answer,
-                immediate.intent,
-                "handoff" if immediate.handoff_required else "safe",
-                immediate.citations,
+                entry_result.immediate_response.answer,
+                entry_result.immediate_response.intent,
+                "handoff" if entry_result.immediate_response.handoff_required else "safe",
+                entry_result.immediate_response.citations,
             )
-            return immediate
+            return entry_result.immediate_response
 
         cache_key = self._cache_key(chat_session.id, report_id, message)
+        cached_response = self._load_cached_response(session, cache_key, chat_session.id)
+        if cached_response:
+            self._store_message(
+                session,
+                chat_session.id,
+                "assistant",
+                cached_response.answer,
+                cached_response.intent,
+                cached_response.safety_level,
+                cached_response.citations,
+            )
+            return cached_response
         execution = self.answer_cache.get(cache_key)
         if not isinstance(execution, AgentExecutionResult):
+            cache_service.delete_agent_response(session, cache_key)
             execution = None
         if execution and self._is_incomplete_answer(self._strip_duplicate_appendix(execution.answer)):
             # 如果缓存里已经是一条半成品答案，宁可丢掉重算。
@@ -160,7 +194,14 @@ class ReactAgentService:
             execution = None
 
         if not execution:
-            execution = self._prepare_fast_path(session, chat_session.id, report_id, message)
+            execution = entry_result.execution or self._prepare_fast_path(
+                session,
+                chat_session.id,
+                report_id,
+                message,
+                conversation_history=entry_result.conversation_history,
+                analysis=entry_result.analysis,
+            )
             execution.answer = self._compose_answer(
                 intent=execution.intent,
                 message=execution.message,
@@ -173,6 +214,7 @@ class ReactAgentService:
             self.answer_cache[cache_key] = execution
 
         response = self._build_agent_response(chat_session.id, execution)
+        self._save_cached_response(session, cache_key, report_id, message, response)
         self._store_message(
             session,
             chat_session.id,
@@ -197,33 +239,61 @@ class ReactAgentService:
         和 `respond()` 的主要区别在于它会把执行过程拆成多个 SSE 事件推给前端。
         """
         chat_session = self._get_or_create_session(session, session_id, report_id, message)
+        # 流式接口与同步接口共享同一套自动命名规则，保证会话列表表现一致。
+        session_service.auto_title_if_needed(session, chat_session.id, message)
         self._store_message(session, chat_session.id, "user", message)
         yield {"event": "session", "data": {"session_id": chat_session.id}}
 
-        immediate = self._handle_immediate_response(session, chat_session.id, report_id, message)
-        if immediate:
+        entry_result = self._run_entry_graph(session, chat_session.id, report_id, message)
+        if entry_result.immediate_response:
             yield {"event": "status", "data": {"label": "已完成安全检查"}}
-            for chunk in self._chunk_text(immediate.answer):
+            for chunk in self._chunk_text(entry_result.immediate_response.answer):
                 yield {"event": "delta", "data": {"text": chunk}}
             self._store_message(
                 session,
                 chat_session.id,
                 "assistant",
-                immediate.answer,
-                immediate.intent,
-                "handoff" if immediate.handoff_required else "safe",
-                immediate.citations,
+                entry_result.immediate_response.answer,
+                entry_result.immediate_response.intent,
+                "handoff" if entry_result.immediate_response.handoff_required else "safe",
+                entry_result.immediate_response.citations,
             )
-            yield {"event": "final", "data": immediate.model_dump(mode="json")}
+            yield {"event": "final", "data": entry_result.immediate_response.model_dump(mode="json")}
             return
 
         yield {"event": "status", "data": {"label": "分析问题中"}}
-        execution = self._prepare_fast_path(session, chat_session.id, report_id, message)
+        cache_key = self._cache_key(chat_session.id, report_id, message)
+        cached_response = self._load_cached_response(session, cache_key, chat_session.id)
+        if cached_response:
+            yield {"event": "status", "data": {"label": "命中缓存，正在返回历史结果"}}
+            self._store_message(
+                session,
+                chat_session.id,
+                "assistant",
+                cached_response.answer,
+                cached_response.intent,
+                cached_response.safety_level,
+                cached_response.citations,
+            )
+            for chunk in self._chunk_text(cached_response.answer):
+                yield {"event": "delta", "data": {"text": chunk}}
+            yield {"event": "final", "data": cached_response.model_dump(mode="json")}
+            return
+
+        execution = entry_result.execution or self._prepare_fast_path(
+            session,
+            chat_session.id,
+            report_id,
+            message,
+            conversation_history=entry_result.conversation_history,
+            analysis=entry_result.analysis,
+        )
         for tool in execution.used_tools:
             yield {"event": "status", "data": {"label": self._tool_status_label(tool)}}
         yield {"event": "status", "data": {"label": "生成回答中"}}
 
-        execution.answer = self._compose_answer(
+        # 娴佸紡鍦烘櫙涓嬮渶瑕佽竟鐢熸垚杈规帹閫乨elta锛屼絾缁撴潫鏃朵粛瑕佹敹鍙栧畬鏁寸瓟妗堢敤浜庣紦瀛樺拰钀藉簱銆?
+        stream_generator = self._stream_compose_answer(
             intent=execution.intent,
             message=execution.message,
             conversation_history=execution.conversation_history,
@@ -232,8 +302,16 @@ class ReactAgentService:
             used_tools=execution.used_tools,
             use_max=execution.use_max,
         )
-        self.answer_cache[self._cache_key(chat_session.id, report_id, message)] = execution
+        while True:
+            try:
+                chunk = next(stream_generator)
+            except StopIteration as stop:
+                execution.answer = stop.value or ""
+                break
+            yield {"event": "delta", "data": {"text": chunk}}
+        self.answer_cache[cache_key] = execution
         response = self._build_agent_response(chat_session.id, execution)
+        self._save_cached_response(session, cache_key, report_id, message, response)
         self._store_message(
             session,
             chat_session.id,
@@ -243,9 +321,77 @@ class ReactAgentService:
             response.safety_level,
             response.citations,
         )
-        for chunk in self._chunk_text(response.answer):
-            yield {"event": "delta", "data": {"text": chunk}}
         yield {"event": "final", "data": response.model_dump(mode="json")}
+
+    def _run_entry_graph(
+        self,
+        session: Session,
+        session_id: str,
+        report_id: str | None,
+        message: str,
+    ) -> AgentEntryResult:
+        """杩愯 LangGraph 鍏ュ彛鍥俱€?
+        濡傛灉鍥惧湪褰撳墠鐜鎴栬姹傞噷鍑虹幇寮傚父锛屽氨绔嬪嵆閫€鍥炲埌鍘熸湁鍏ュ彛閫昏緫锛?
+        閬垮厤鍥犱负鏋舵瀯鍗囩骇褰卞搷鍒板凡缁忔甯稿伐浣滅殑鍔熻兘銆?
+        """
+        conversation_history = self._recent_conversation_context(session, session_id)
+        try:
+            state = self.entry_graph.invoke(
+                {
+                    "session": session,
+                    "chat_session_id": session_id,
+                    "report_id": report_id,
+                    "message": message,
+                }
+            )
+            return AgentEntryResult(
+                conversation_history=state.get("conversation_history") or conversation_history,
+                analysis=state.get("analysis"),
+                immediate_response=state.get("immediate_response"),
+                execution=(
+                    AgentExecutionResult.model_validate(state["execution_data"])
+                    if state.get("execution_data")
+                    else None
+                ),
+            )
+        except Exception:
+            logger.exception("Entry graph failed, fallback to legacy entry path")
+            immediate = self._handle_immediate_response(session, session_id, report_id, message)
+            if immediate:
+                return AgentEntryResult(conversation_history=conversation_history, immediate_response=immediate)
+            return AgentEntryResult(
+                conversation_history=conversation_history,
+                analysis=self._analyze_input(message, report_id is not None, conversation_history),
+                execution=None,
+            )
+
+    def _build_safety_handoff_response(self, session_id: str, reason: str | None) -> AgentResponse:
+        """鎶婂畨鍏ㄩ檷绾ф剰瑙佺粺涓€缁勮鎴愬彲鐩存帴杩斿洖鐨?AgentResponse銆?"""
+        answer = f"{reason or '当前问题涉及高风险医疗决策。'}\n\n请尽快联系医生或线下医疗机构获取专业评估。"
+        return AgentResponse(
+            session_id=session_id,
+            intent="safety_handoff",
+            answer=self._with_safety_appendix(answer),
+            citations=[],
+            used_tools=[],
+            follow_up_questions=[],
+            safety_level="handoff",
+            handoff_required=True,
+        )
+
+    def _build_report_not_ready_response(self, session_id: str, parse_status: str) -> AgentResponse:
+        """鎶婃姤鍛婃湭瀹屾垚鐨勫満鏅粺涓€缁勮锛岄伩鍏嶅澶勫垎鏀悇鑷啓涓€閬嶆枃妗堛€?"""
+        answer = "报告还在后台解析中，等解析完成后我再为你解读。" if parse_status != "error" else "报告解析失败，建议重新上传更清晰的文件。"
+        return AgentResponse(
+            session_id=session_id,
+            intent="collect_more_info",
+            answer=self._with_safety_appendix(answer),
+            citations=[],
+            used_tools=[],
+            follow_up_questions=[],
+            safety_level="safe",
+            handoff_required=False,
+        )
 
     def _handle_immediate_response(
         self,
@@ -293,12 +439,14 @@ class ReactAgentService:
         chat_session_id: str,
         report_id: str | None,
         message: str,
+        conversation_history: list[dict[str, str]] | None = None,
+        analysis: InputAnalysisResult | None = None,
     ) -> AgentExecutionResult:
         """Agent 主链的前半段：先用结构化、可控、较便宜的步骤准备信息。"""
         # 先读取短期上下文，再基于上下文做输入分析。
         # 这一层的目标是准备材料，而不是直接生成答案。
-        conversation_history = self._recent_conversation_context(session, chat_session_id)
-        analysis = self._analyze_input(message, report_id is not None, conversation_history)
+        conversation_history = conversation_history or self._recent_conversation_context(session, chat_session_id)
+        analysis = analysis or self._analyze_input(message, report_id is not None, conversation_history)
         if analysis.intent == "collect_more_info":
             return AgentExecutionResult(
                 intent="collect_more_info",
@@ -346,6 +494,102 @@ class ReactAgentService:
             used_tools=[tool_name],
             follow_up_questions=self._default_follow_up_questions(analysis.intent),
             tool_outputs=[{"tool": tool_name, "result": {"query": effective_query, "docs": knowledge_service.pack_docs(docs), "analysis_reason": analysis.reason}}],
+            conversation_history=conversation_history,
+            message=message,
+            use_max=analysis.use_max,
+            debug={"analysis": analysis.model_dump(mode="json")},
+        )
+
+    def _build_collect_more_info_execution(
+        self,
+        conversation_history: list[dict[str, str]],
+        message: str,
+        analysis: InputAnalysisResult,
+    ) -> AgentExecutionResult:
+        """组装信息不足场景的结构化执行结果。"""
+        return AgentExecutionResult(
+            intent="collect_more_info",
+            follow_up_questions=["请补充你最关注的是哪项指标、有没有不适，以及这些情况持续了多久。"],
+            conversation_history=conversation_history,
+            message=message,
+            use_max=analysis.use_max,
+            debug={"analysis": analysis.model_dump(mode="json")},
+        )
+
+    def _build_report_follow_up_execution(
+        self,
+        session: Session,
+        report_id: str | None,
+        conversation_history: list[dict[str, str]],
+        message: str,
+        analysis: InputAnalysisResult,
+    ) -> AgentExecutionResult:
+        """组装报告追问场景的结构化执行结果。"""
+        if not report_id:
+            return self._build_collect_more_info_execution(conversation_history, message, analysis)
+        report = report_service.get_report(session, report_id)
+        seed_focus_items = [item.model_dump(mode="json") for item in (report.abnormal_items[:8] or report.items[:8])]
+        related_items = [item.model_dump(mode="json") for item in report.items[:12]]
+        plan = self._plan_report_follow_up(message, conversation_history, seed_focus_items, related_items)
+        focus_items = self._select_focus_items_from_plan(plan, seed_focus_items, related_items)
+        interpretations, citations = self._interpret_lab_batch(session, focus_items, related_items)
+        synthesis = self._build_report_synthesis(message, plan, interpretations, related_items)
+        return AgentExecutionResult(
+            intent="report_follow_up",
+            citations=citations,
+            used_tools=["search_report_items", "interpret_lab"],
+            follow_up_questions=self._report_follow_up_questions(plan),
+            tool_outputs=[
+                {
+                    "tool": "search_report_items",
+                    "result": {
+                        "abnormal_items": [item.model_dump(mode="json") for item in report.abnormal_items[:8]],
+                        "focus_items": focus_items,
+                        "related_items": related_items,
+                        "raw_text_excerpt": report.raw_text[:800],
+                        "analysis_reason": analysis.reason,
+                    },
+                },
+                {"tool": "report_follow_up_plan", "result": plan.model_dump(mode="json")},
+                {"tool": "interpret_lab", "result": {"items": interpretations}},
+                {"tool": "report_synthesis", "result": synthesis.model_dump(mode="json")},
+            ],
+            conversation_history=conversation_history,
+            message=message,
+            use_max=analysis.use_max,
+            debug={
+                "analysis": analysis.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json"),
+                "synthesis": synthesis.model_dump(mode="json"),
+            },
+        )
+
+    def _build_retrieval_execution(
+        self,
+        session: Session,
+        conversation_history: list[dict[str, str]],
+        message: str,
+        analysis: InputAnalysisResult,
+    ) -> AgentExecutionResult:
+        """组装普通知识检索场景的结构化执行结果。"""
+        effective_query = analysis.rewritten_query or message
+        tool_name = "query_drug" if any(token in effective_query for token in DRUG_KEYWORDS) else "retrieve_knowledge"
+        docs = knowledge_service.retrieve(session, effective_query) if analysis.use_local_knowledge else []
+        return AgentExecutionResult(
+            intent=analysis.intent,
+            citations=self._knowledge_citations(docs),
+            used_tools=[tool_name],
+            follow_up_questions=self._default_follow_up_questions(analysis.intent),
+            tool_outputs=[
+                {
+                    "tool": tool_name,
+                    "result": {
+                        "query": effective_query,
+                        "docs": knowledge_service.pack_docs(docs),
+                        "analysis_reason": analysis.reason,
+                    },
+                }
+            ],
             conversation_history=conversation_history,
             message=message,
             use_max=analysis.use_max,
@@ -653,6 +897,67 @@ class ReactAgentService:
                 logger.exception("Answer composition failed")
         return self._fallback_answer(intent, tool_outputs, citations, used_tools)
 
+    def _stream_compose_answer(
+        self,
+        intent: str,
+        message: str,
+        conversation_history: list[dict[str, str]],
+        tool_outputs: list[dict[str, Any]],
+        citations: list[Citation],
+        used_tools: list[str],
+        use_max: bool,
+    ) -> Iterator[str]:
+        """涓撲緵 SSE 流式接口使用的答案生成器。
+        它会边生成边产出 delta，并在结束时返回最终答案，方便沿用现有缓存和落库逻辑。
+        """
+        if intent == "report_follow_up":
+            draft = self._build_report_follow_up_answer(tool_outputs)
+            if llm_service.is_configured and use_max and draft:
+                plan, synthesis = self._extract_report_debug_materials(tool_outputs)
+                streamed_chunks: list[str] = []
+                try:
+                    for chunk in llm_service.chat_text_stream_max(
+                        report_answer_polish_system_prompt(),
+                        report_answer_polish_user_prompt(message=message, draft_answer=draft, plan=plan, synthesis=synthesis),
+                    ):
+                        if not chunk:
+                            continue
+                        streamed_chunks.append(chunk)
+                        yield chunk
+                    polished = "".join(streamed_chunks).strip()
+                    if polished and not self._is_incomplete_answer(polished):
+                        return polished
+                except Exception:
+                    logger.exception("Report answer stream polish failed")
+            return draft or self._fallback_answer(intent, tool_outputs, citations, used_tools)
+
+        if llm_service.is_configured and use_max:
+            streamed_chunks: list[str] = []
+            try:
+                for chunk in llm_service.chat_text_stream_max(
+                    self._answer_system_prompt(intent),
+                    answer_composer_user_prompt(
+                        intent=intent,
+                        message=message,
+                        conversation_history=conversation_history,
+                        tool_outputs=tool_outputs,
+                        citations=[citation.model_dump(mode="json") for citation in citations],
+                    ),
+                ):
+                    if not chunk:
+                        continue
+                    streamed_chunks.append(chunk)
+                    yield chunk
+                answer = "".join(streamed_chunks).strip()
+                if answer and not self._is_incomplete_answer(answer):
+                    return self._append_source_marker(intent, used_tools, answer)
+                repaired = self._repair_incomplete_answer(intent, message, answer, tool_outputs, citations, used_tools)
+                if repaired:
+                    return repaired
+            except Exception:
+                logger.exception("Answer stream composition failed")
+        return self._fallback_answer(intent, tool_outputs, citations, used_tools)
+
     def _extract_report_debug_materials(self, tool_outputs: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
         """从工具输出中抽取 plan 和 synthesis，供调试或润色阶段使用。"""
         plan = next((item["result"] for item in tool_outputs if item["tool"] == "report_follow_up_plan"), {})
@@ -933,6 +1238,36 @@ class ReactAgentService:
         if plan.need_next_steps:
             return ["如果你愿意，我可以继续说明这些异常下一步一般怎么复查、关注哪些生活方式因素。"]
         return self._default_follow_up_questions("report_follow_up")
+
+    def _load_cached_response(self, session: Session, cache_key: str, session_id: str) -> AgentResponse | None:
+        """先查持久化缓存，再做完整性校验。"""
+        cached = cache_service.load_agent_response(session, cache_key)
+        if not cached:
+            return None
+        if self._is_incomplete_answer(self._strip_duplicate_appendix(cached.answer)):
+            cache_service.delete_agent_response(session, cache_key)
+            return None
+        return cached.model_copy(update={"session_id": session_id})
+
+    def _save_cached_response(
+        self,
+        session: Session,
+        cache_key: str,
+        report_id: str | None,
+        message: str,
+        response: AgentResponse,
+    ) -> None:
+        """只缓存完整结果，避免把半成品答案落库。"""
+        if self._is_incomplete_answer(self._strip_duplicate_appendix(response.answer)):
+            cache_service.delete_agent_response(session, cache_key)
+            return
+        cache_service.save_agent_response(
+            session=session,
+            cache_key=cache_key,
+            report_id=report_id,
+            normalized_message=re.sub(r"\s+", " ", message.strip()),
+            response=response,
+        )
 
     def _cache_key(self, session_id: str, report_id: str | None, message: str) -> str:
         """生成回答缓存键。"""

@@ -91,11 +91,60 @@ class SummaryArtifact(BaseModel):
     created_at: datetime
 
 
+class SessionReportInfo(BaseModel):
+    """会话中当前绑定报告的简要信息。"""
+    report_id: str
+    file_name: str
+    parse_status: str
+
+
+class SessionSummary(BaseModel):
+    """左侧会话列表需要的摘要信息。"""
+    session_id: str
+    title: str
+    created_at: datetime
+    last_message_at: datetime
+    message_count: int
+    last_message_preview: str
+    report: SessionReportInfo | None = None
+
+
+class SessionDetail(BaseModel):
+    """单个会话的完整概览信息。"""
+    session_id: str
+    title: str
+    created_at: datetime
+    last_message_at: datetime
+    message_count: int
+    report: SessionReportInfo | None = None
+
+
+class SessionMessage(BaseModel):
+    """会话历史消息的接口表达。"""
+    message_id: str
+    role: str
+    content: str
+    intent: str | None = None
+    safety_level: str = "safe"
+    citations: list[Citation] = Field(default_factory=list)
+    created_at: datetime
+
+
 class ChatRequest(BaseModel):
     """聊天请求体。"""
     session_id: str | None = None
     report_id: str | None = None
     message: str
+
+
+class SessionCreateRequest(BaseModel):
+    """新建会话请求体。"""
+    title: str | None = None
+
+
+class SessionRenameRequest(BaseModel):
+    """会话重命名请求体。"""
+    title: str
 
 
 class SummaryRequest(BaseModel):

@@ -71,6 +71,41 @@ export interface SummaryArtifact {
   created_at: string;
 }
 
+export interface SessionReportInfo {
+  report_id: string;
+  file_name: string;
+  parse_status: string;
+}
+
+export interface SessionSummary {
+  session_id: string;
+  title: string;
+  created_at: string;
+  last_message_at: string;
+  message_count: number;
+  last_message_preview: string;
+  report?: SessionReportInfo | null;
+}
+
+export interface SessionDetail {
+  session_id: string;
+  title: string;
+  created_at: string;
+  last_message_at: string;
+  message_count: number;
+  report?: SessionReportInfo | null;
+}
+
+export interface SessionMessage {
+  message_id: string;
+  role: string;
+  content: string;
+  intent?: string | null;
+  safety_level: "safe" | "caution" | "handoff";
+  citations: Citation[];
+  created_at: string;
+}
+
 export interface KnowledgeDoc {
   doc_id: string;
   title: string;
