@@ -135,6 +135,20 @@ class ReportInsight(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now, index=True)
 
 
+class SessionReportLink(SQLModel, table=True):
+    """会话与报告的历史关联。
+
+    `ChatSession.report_id` 只表示当前绑定的报告；
+    这个表额外保留“这个会话曾经关联过哪些报告”，
+    便于后续做趋势比较和长期跟踪。
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    session_id: str = Field(index=True)
+    report_id: str = Field(index=True)
+    linked_at: datetime = Field(default_factory=utc_now, index=True)
+
+
 class LabItem(SQLModel, table=True):
     """报告里的单个结构化指标。"""
 

@@ -36,6 +36,7 @@ from app.services.prompt_templates import (
     term_explanation_system_prompt,
 )
 from app.services.report_service import report_service
+from app.services.report_tool_service import report_tool_service
 from app.services.routing_service import routing_service
 from app.services.safety_service import DEFAULT_SAFETY_APPENDIX, safety_service
 from app.services.session_service import session_service
@@ -1131,28 +1132,13 @@ class ReactAgentService:
             )
 
         if report_id and analysis.intent == "report_follow_up":
-            report = report_service.get_report(session, report_id)
-            seed_focus_items = [item.model_dump(mode="json") for item in (report.abnormal_items[:8] or report.items[:8])]
-            related_items = [item.model_dump(mode="json") for item in report.items[:12]]
-            plan = self._plan_report_follow_up(message, conversation_history, seed_focus_items, related_items)
-            focus_items = self._select_focus_items_from_plan(plan, seed_focus_items, related_items)
-            interpretations, citations = self._interpret_lab_batch(session, focus_items, related_items)
-            synthesis = self._build_report_synthesis(message, plan, interpretations, related_items)
-            return AgentExecutionResult(
-                intent="report_follow_up",
-                citations=citations,
-                used_tools=["search_report_items", "interpret_lab"],
-                follow_up_questions=self._report_follow_up_questions(plan),
-                tool_outputs=[
-                    {"tool": "search_report_items", "result": {"abnormal_items": [item.model_dump(mode="json") for item in report.abnormal_items[:8]], "focus_items": focus_items, "related_items": related_items, "raw_text_excerpt": report.raw_text[:800], "analysis_reason": analysis.reason}},
-                    {"tool": "report_follow_up_plan", "result": plan.model_dump(mode="json")},
-                    {"tool": "interpret_lab", "result": {"items": interpretations}},
-                    {"tool": "report_synthesis", "result": synthesis.model_dump(mode="json")},
-                ],
+            return self._build_report_follow_up_execution(
+                session=session,
+                session_id=chat_session_id,
+                report_id=report_id,
                 conversation_history=conversation_history,
                 message=message,
-                use_max=analysis.use_max,
-                debug={"analysis": analysis.model_dump(mode="json"), "plan": plan.model_dump(mode="json"), "synthesis": synthesis.model_dump(mode="json")},
+                analysis=analysis,
             )
 
         if analysis.intent == "term_explanation":
@@ -1192,6 +1178,7 @@ class ReactAgentService:
     def _build_report_follow_up_execution(
         self,
         session: Session,
+        session_id: str,
         report_id: str | None,
         conversation_history: list[dict[str, str]],
         message: str,
@@ -1214,15 +1201,39 @@ class ReactAgentService:
         plan = self._plan_report_follow_up(message, conversation_history, seed_focus_items, related_items)
         focus_items = self._select_focus_items_from_plan(plan, seed_focus_items, related_items)
         if status_emitter:
+            status_emitter("标准化指标名称中")
+        normalized_items = report_tool_service.normalize_lab_items(focus_items or seed_focus_items)
+        if status_emitter:
+            status_emitter("比较历史报告趋势中")
+        trend_result = report_tool_service.compare_report_trends(
+            session,
+            session_id,
+            report_id,
+            focus_item_names=[item.get("name", "") for item in focus_items],
+        )
+        if status_emitter:
+            status_emitter("评估规则风险中")
+        risk_flags = report_tool_service.build_report_risk_flags(
+            focus_items or seed_focus_items,
+            normalized_items=normalized_items,
+        )
+        if status_emitter:
             status_emitter("解释异常指标中")
         interpretations, citations = self._interpret_lab_batch(session, focus_items, related_items)
         if status_emitter:
             status_emitter("生成综合结论中")
-        synthesis = self._build_report_synthesis(message, plan, interpretations, related_items)
+        synthesis = self._build_report_synthesis(
+            message,
+            plan,
+            interpretations,
+            related_items,
+            trend_result=trend_result.model_dump(mode="json"),
+            risk_flags=[flag.model_dump(mode="json") for flag in risk_flags],
+        )
         return AgentExecutionResult(
             intent="report_follow_up",
             citations=citations,
-            used_tools=["search_report_items", "interpret_lab"],
+            used_tools=["search_report_items", "normalize_lab_item", "compare_report_trends", "report_risk_flags", "interpret_lab"],
             follow_up_questions=self._report_follow_up_questions(plan),
             tool_outputs=[
                 {
@@ -1236,6 +1247,12 @@ class ReactAgentService:
                     },
                 },
                 {"tool": "report_follow_up_plan", "result": plan.model_dump(mode="json")},
+                {
+                    "tool": "normalize_lab_item",
+                    "result": {"items": [item.model_dump(mode="json") for item in normalized_items]},
+                },
+                {"tool": "compare_report_trends", "result": trend_result.model_dump(mode="json")},
+                {"tool": "report_risk_flags", "result": {"flags": [flag.model_dump(mode="json") for flag in risk_flags]}},
                 {"tool": "interpret_lab", "result": {"items": interpretations}},
                 {"tool": "report_synthesis", "result": synthesis.model_dump(mode="json")},
             ],
@@ -1369,10 +1386,12 @@ class ReactAgentService:
         plan: ReportFollowUpPlan,
         interpretations: list[dict[str, Any]],
         related_items: list[dict[str, Any]],
+        trend_result: dict[str, Any] | None = None,
+        risk_flags: list[dict[str, Any]] | None = None,
     ) -> ReportSynthesisResult:
         """把多个单项解释提升为综合异常层。"""
         # 如果模型失败，至少也要有一版“综合结论”可用。
-        fallback = self._fallback_report_synthesis(plan, interpretations)
+        fallback = self._fallback_report_synthesis(plan, interpretations, trend_result=trend_result, risk_flags=risk_flags)
         if not llm_service.is_configured or not interpretations:
             return fallback
         try:
@@ -1394,12 +1413,22 @@ class ReactAgentService:
                 parsed.combined_findings = fallback.combined_findings
             if not parsed.next_steps:
                 parsed.next_steps = fallback.next_steps
+            else:
+                parsed.next_steps = self._merge_unique_lines(parsed.next_steps, fallback.next_steps)
+            parsed.combined_findings = self._merge_unique_lines(parsed.combined_findings, fallback.combined_findings)
             return parsed
         except Exception:
             logger.exception("Report synthesis failed")
             return fallback
 
-    def _fallback_report_synthesis(self, plan: ReportFollowUpPlan, interpretations: list[dict[str, Any]]) -> ReportSynthesisResult:
+    def _fallback_report_synthesis(
+        self,
+        plan: ReportFollowUpPlan,
+        interpretations: list[dict[str, Any]],
+        *,
+        trend_result: dict[str, Any] | None = None,
+        risk_flags: list[dict[str, Any]] | None = None,
+    ) -> ReportSynthesisResult:
         """当综合异常层模型失败时，用规则拼一版可用的综合结果。"""
         axes = [axis for axis in plan.synthesis_axes[:4] if axis]
         if not axes:
@@ -1413,13 +1442,40 @@ class ReactAgentService:
         if names:
             findings.append("当前更值得优先解释的异常项目包括：" + "、".join(names) + "。")
         findings.append("单次体检异常不等于明确疾病，仍需结合复查趋势和临床表现判断。")
+        for comparison in (trend_result or {}).get("comparisons", [])[:3]:
+            summary = str(comparison.get("summary") or "").strip()
+            if summary:
+                findings.append(summary)
+        for flag in (risk_flags or [])[:2]:
+            reason = str(flag.get("reason") or "").strip()
+            if reason:
+                findings.append(reason)
         next_steps = []
         if plan.need_next_steps:
             next_steps.append("建议先结合原始报告参考范围、采血条件和近期症状一起判断。")
             if axes:
                 next_steps.append("如异常持续存在，可优先咨询：" + "、".join(axes[:3]) + "。")
             next_steps.append("如涉及空腹状态、饮食、运动、体重变化或脱水情况，也建议一并回顾。")
+            if (trend_result or {}).get("previous_report_id"):
+                next_steps.append("建议把本次结果与上一份报告一起保留，后续复查时优先关注趋势变化。")
+            for flag in (risk_flags or [])[:2]:
+                action = str(flag.get("suggested_action") or "").strip()
+                if action:
+                    next_steps.append(action)
         return ReportSynthesisResult(summary=summary, priority_axes=axes, combined_findings=findings, next_steps=next_steps)
+
+    def _merge_unique_lines(self, primary: list[str], secondary: list[str]) -> list[str]:
+        """把规则补充项合并进模型输出，避免重复内容。"""
+
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in [*primary, *secondary]:
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+        return merged
 
     def _prepare_term_explanation(
         self,
@@ -1668,6 +1724,8 @@ class ReactAgentService:
         """把报告解释素材直接组装成一版完整可用的答案。"""
         lab_result = next((item["result"] for item in tool_outputs if item["tool"] == "interpret_lab"), {})
         synthesis_result = next((item["result"] for item in tool_outputs if item["tool"] == "report_synthesis"), {})
+        trend_result = next((item["result"] for item in tool_outputs if item["tool"] == "compare_report_trends"), {})
+        risk_result = next((item["result"] for item in tool_outputs if item["tool"] == "report_risk_flags"), {})
         items = lab_result.get("items", []) if isinstance(lab_result, dict) else []
         if not items:
             return ""
@@ -1693,6 +1751,23 @@ class ReactAgentService:
         lines.append(summary or "这些异常需要结合参考范围、症状和后续复查结果一起综合判断。")
         for finding in (synthesis_result.get("combined_findings", []) if isinstance(synthesis_result, dict) else [])[:4]:
             lines.append(f"- {finding}")
+        trend_comparisons = trend_result.get("comparisons", []) if isinstance(trend_result, dict) else []
+        if trend_comparisons:
+            lines.extend(["", "### 趋势观察"])
+            for comparison in trend_comparisons[:3]:
+                summary_text = str(comparison.get("summary") or "").strip()
+                if summary_text:
+                    lines.append(f"- {summary_text}")
+        risk_flags = risk_result.get("flags", []) if isinstance(risk_result, dict) else []
+        if risk_flags:
+            lines.extend(["", "### 风险提示"])
+            for flag in risk_flags[:3]:
+                reason = str(flag.get("reason") or "").strip()
+                action = str(flag.get("suggested_action") or "").strip()
+                if reason:
+                    lines.append(f"- {reason}")
+                if action:
+                    lines.append(f"  建议：{action}")
         lines.extend(["", "### 后续建议"])
         next_steps = synthesis_result.get("next_steps", []) if isinstance(synthesis_result, dict) else []
         if next_steps:
@@ -2130,6 +2205,8 @@ class ReactAgentService:
         session.add(chat_session)
         session.commit()
         session.refresh(chat_session)
+        if report_id:
+            report_tool_service.ensure_session_report_link(session, chat_session.id, report_id)
         return chat_session
 
     def _store_message(

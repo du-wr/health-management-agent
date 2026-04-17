@@ -10,6 +10,7 @@ from app.services.llm import llm_service
 from app.services.react_agent import react_agent_service
 from app.services.routing_service import routing_service
 from app.services.safety_service import DEFAULT_SAFETY_APPENDIX
+from app.services.session_service import session_service
 from app.services.who_service import who_service
 
 
@@ -203,7 +204,7 @@ def test_react_agent_report_follow_up_uses_fast_path_tools() -> None:
         )
 
         assert response.intent == "report_follow_up"
-        assert response.used_tools == ["search_report_items", "interpret_lab"]
+        assert response.used_tools == ["search_report_items", "normalize_lab_item", "compare_report_trends", "report_risk_flags", "interpret_lab"]
         assert "总胆固醇" in response.answer
 
 
@@ -244,6 +245,62 @@ def test_report_follow_up_response_contains_debug_payload() -> None:
     assert response.debug is not None
     assert response.debug.analysis
     assert response.debug.plan
+    assert response.debug.synthesis
+    assert response.debug.memory is not None
+
+
+def test_report_follow_up_uses_previous_report_trend() -> None:
+    with make_session() as session:
+        knowledge_service.seed_local_knowledge(session)
+        chat_session = ChatSession(title="trend-report")
+        previous_report = Report(file_name="previous.pdf", file_path="previous.pdf", parse_status="parsed")
+        current_report = Report(file_name="current.pdf", file_path="current.pdf", parse_status="parsed")
+        session.add(chat_session)
+        session.add(previous_report)
+        session.add(current_report)
+        session.commit()
+        session.refresh(chat_session)
+        session.refresh(previous_report)
+        session.refresh(current_report)
+
+        session.add(
+            LabItem(
+                report_id=previous_report.id,
+                name="低密度脂蛋白",
+                value_raw="3.8",
+                value_num=3.8,
+                unit="mmol/L",
+                reference_range="0-3.4",
+                status="high",
+            )
+        )
+        session.add(
+            LabItem(
+                report_id=current_report.id,
+                name="LDL-C",
+                value_raw="4.5",
+                value_num=4.5,
+                unit="mmol/L",
+                reference_range="0-3.4",
+                status="high",
+            )
+        )
+        session.commit()
+
+        session_service.bind_report(session, chat_session.id, previous_report.id)
+        session_service.bind_report(session, chat_session.id, current_report.id)
+
+        response = react_agent_service.respond(
+            session=session,
+            session_id=chat_session.id,
+            report_id=current_report.id,
+            message="这次血脂和上次相比怎么样？",
+            output_dir=Path("."),
+        )
+
+    assert response.intent == "report_follow_up"
+    assert "趋势观察" in response.answer
+    assert response.debug is not None
     assert response.debug.synthesis
 
 

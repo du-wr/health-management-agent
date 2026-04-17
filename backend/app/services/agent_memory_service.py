@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 
 from app.core.schemas import ReportInsightRecord, SessionMemoryRecord
 from app.models.entities import ChatMessage, ReportInsight, SessionMemory
+from app.services.report_tool_service import report_tool_service
 
 
 class AgentMemoryService:
@@ -34,7 +35,7 @@ class AgentMemoryService:
             if assistant_messages:
                 summary_parts.append("最近一次系统结论摘要：" + assistant_messages[-1][:120])
             summary_text = "\n".join(summary_parts).strip()
-            record = existing or SessionMemory(session_id=session_id)
+            record = existing or SessionMemory(session_id=session_id, report_id=report_id)
             record.latest_run_id = latest_run_id or record.latest_run_id
             record.summary_text = summary_text
             record.focus_points_json = json.dumps(focus_points, ensure_ascii=False)
@@ -46,7 +47,7 @@ class AgentMemoryService:
             session.refresh(record)
             return self._to_session_memory_record(record)
 
-        record = existing or SessionMemory(session_id=session_id)
+        record = existing or SessionMemory(session_id=session_id, report_id=report_id)
         record.latest_run_id = latest_run_id or record.latest_run_id
         record.summary_text = ""
         record.focus_points_json = "[]"
@@ -77,13 +78,24 @@ class AgentMemoryService:
 
         report = report_service.get_report(session, report_id)
         abnormal_items = report.abnormal_items[:8]
-        abnormal_names = [item.name for item in abnormal_items]
+        abnormal_payload = [item.model_dump(mode="json") for item in abnormal_items]
+        normalized_items = report_tool_service.normalize_lab_items(abnormal_payload)
+        risk_flags = report_tool_service.build_report_risk_flags(
+            abnormal_payload,
+            normalized_items=normalized_items,
+        )
+
+        abnormal_names = [item.display_name for item in normalized_items if item.display_name]
         key_findings = [
-            f"{item.name}: {item.value_raw}{item.unit or ''}（参考范围：{item.reference_range or '未提供'}）"
-            for item in abnormal_items[:5]
+            f"{item.display_name}: {item.value_raw}{item.unit or ''}（参考范围：{item.reference_range or '未提供'}）"
+            for item in normalized_items[:5]
         ]
+        key_findings.extend(flag.reason for flag in risk_flags[:3])
+
         if abnormal_names:
             monitoring_summary = "当前需要重点跟踪的异常指标有：" + "、".join(abnormal_names[:5]) + "。"
+            if risk_flags:
+                monitoring_summary += " " + "；".join(flag.reason for flag in risk_flags[:2])
         elif report.parse_status == "needs_review":
             monitoring_summary = "报告可用信息有限，建议结合原始报告和人工复核继续判断。"
         else:

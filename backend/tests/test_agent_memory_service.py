@@ -63,5 +63,5 @@ def test_refresh_report_insight_builds_monitoring_summary() -> None:
 
     assert insight.report_id == report_id
     assert insight.parse_status == "parsed"
-    assert "低密度脂蛋白" in insight.abnormal_item_names
+    assert "低密度脂蛋白胆固醇" in insight.abnormal_item_names
     assert "重点跟踪" in insight.monitoring_summary

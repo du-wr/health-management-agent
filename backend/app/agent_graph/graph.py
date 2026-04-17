@@ -214,6 +214,7 @@ def _prepare_report_follow_up_node(service: Any, state: AgentEntryGraphState) ->
     """准备报告追问场景的结构化执行结果。"""
     execution = service._build_report_follow_up_execution(
         session=state["session"],
+        session_id=state["chat_session_id"],
         report_id=state.get("report_id"),
         conversation_history=state.get("conversation_history", []),
         message=state["message"],

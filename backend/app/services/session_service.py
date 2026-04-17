@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 from app.core.schemas import Citation, SessionDetail, SessionMessage, SessionReportInfo, SessionSummary
 from app.models.entities import ChatMessage, ChatSession, Report, SummaryArtifact
 from app.services.agent_memory_service import agent_memory_service
+from app.services.report_tool_service import report_tool_service
 
 
 class SessionService:
@@ -61,6 +62,7 @@ class SessionService:
         chat_session.report_id = report_id
         session.add(chat_session)
         session.commit()
+        report_tool_service.ensure_session_report_link(session, session_id, report_id)
         agent_memory_service.bind_session_report(session, session_id, report_id)
         session.refresh(chat_session)
         return self._build_session_detail(session, chat_session)
@@ -77,6 +79,7 @@ class SessionService:
             session.delete(message)
         for artifact in artifacts:
             session.delete(artifact)
+        report_tool_service.delete_session_links(session, session_id)
         session.delete(chat_session)
         session.commit()
 

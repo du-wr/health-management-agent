@@ -2,7 +2,7 @@ from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models.entities import ChatMessage, ChatSession, SummaryArtifact
+from app.models.entities import ChatMessage, ChatSession, Report, SessionReportLink, SummaryArtifact
 from app.services.session_service import session_service
 
 
@@ -44,3 +44,22 @@ def test_delete_session_removes_messages_and_summaries(tmp_path: Path) -> None:
         assert len(session.exec(select(ChatMessage).where(ChatMessage.session_id == preserved_session.id)).all()) == 1
         assert session.exec(select(SummaryArtifact).where(SummaryArtifact.session_id == target_session.id)).all() == []
         assert pdf_path.exists() is False
+
+
+def test_bind_report_creates_history_link() -> None:
+    with make_session() as session:
+        chat_session = ChatSession(title="趋势会话")
+        report = Report(file_name="report.pdf", file_path="report.pdf", parse_status="queued")
+        session.add(chat_session)
+        session.add(report)
+        session.commit()
+        session.refresh(chat_session)
+        session.refresh(report)
+
+        detail = session_service.bind_report(session, chat_session.id, report.id)
+
+        links = session.exec(select(SessionReportLink).where(SessionReportLink.session_id == chat_session.id)).all()
+        assert detail.report is not None
+        assert detail.report.report_id == report.id
+        assert len(links) == 1
+        assert links[0].report_id == report.id
