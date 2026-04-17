@@ -57,6 +57,54 @@ export interface AgentDebug {
   trace_summary?: Array<Record<string, unknown>>;
 }
 
+export interface AgentGoalSummary {
+  goal_id: string;
+  session_id: string;
+  report_id?: string | null;
+  goal_type: string;
+  title: string;
+  status: string;
+  source_intent?: string | null;
+  latest_user_message: string;
+  last_run_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentTaskRunSummary {
+  run_id: string;
+  session_id: string;
+  goal_id?: string | null;
+  report_id?: string | null;
+  user_message: string;
+  status: string;
+  intent?: string | null;
+  response_mode: string;
+  cache_status: string;
+  handoff_required: boolean;
+  answer_excerpt: string;
+  used_tools: string[];
+  started_at: string;
+  finished_at?: string | null;
+}
+
+export interface AgentTraceEventRecord {
+  event_id: string;
+  run_id: string;
+  sequence_no: number;
+  phase: string;
+  step_name: string;
+  status: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AgentRunDetail {
+  task_run: AgentTaskRunSummary;
+  goal?: AgentGoalSummary | null;
+  trace_events: AgentTraceEventRecord[];
+}
+
 export interface AgentResponse {
   session_id: string;
   intent: IntentName;

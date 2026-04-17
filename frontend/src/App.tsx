@@ -4,10 +4,12 @@ import {
   createSession,
   deleteSession,
   generateSummaryForSession,
+  getAgentRunDetail,
   getReport,
   getSessionDetail,
   getSessionMessages,
   getSessionSummaries,
+  listSessionAgentRuns,
   listSessions,
   renameSession,
   streamChat,
@@ -15,6 +17,8 @@ import {
   uploadReportToSession,
 } from "./api";
 import type {
+  AgentRunDetail,
+  AgentTaskRunSummary,
   AgentResponse,
   ChatStreamEvent,
   Citation,
@@ -166,6 +170,29 @@ function formatDebugValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function tracePhaseText(phase: string): string {
+  const mapping: Record<string, string> = {
+    session: "会话",
+    entry: "入口图",
+    cache: "缓存",
+    execution: "工具执行",
+    compose: "生成",
+    response: "响应",
+    error: "异常",
+  };
+  return mapping[phase] ?? phase;
+}
+
+function runStatusText(status: string): string {
+  const mapping: Record<string, string> = {
+    running: "进行中",
+    completed: "已完成",
+    handoff: "已转交",
+    failed: "失败",
+  };
+  return mapping[status] ?? status;
+}
+
 function reportStatusText(status: string): string {
   if (status === "uploaded") return "已上传";
   if (status === "queued") return "排队中";
@@ -274,6 +301,12 @@ export default function App() {
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [agentRuns, setAgentRuns] = useState<AgentTaskRunSummary[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRunDetail, setSelectedRunDetail] = useState<AgentRunDetail | null>(null);
+  const [loadingRuns, setLoadingRuns] = useState(false);
+  const [loadingRunDetail, setLoadingRunDetail] = useState(false);
 
   const closeReportStreamRef = useRef<(() => void) | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
@@ -327,6 +360,9 @@ export default function App() {
     setSummaryHistory([]);
     setSelectedSummaryId(null);
     setSummaryOpen(false);
+    setAgentRuns([]);
+    setSelectedRunId(null);
+    setSelectedRunDetail(null);
   }
 
   function applySummaryHistory(nextSummaries: SummaryArtifact[]) {
@@ -396,12 +432,55 @@ export default function App() {
           subscribeReportProgress(loadedReport.report_id, sessionId);
         }
       }
+      if (traceOpen) {
+        await refreshAgentRuns(sessionId);
+      }
     } catch (sessionError) {
       resetWorkspaceView();
       setError(sessionError instanceof Error ? sessionError.message : "加载会话失败。");
     } finally {
       setLoadingSession(false);
     }
+  }
+
+  async function refreshAgentRuns(sessionId: string, preferredRunId?: string | null) {
+    // Agent 轨迹只在调试抽屉打开后按需加载，避免给普通聊天流增加额外压力。
+    setLoadingRuns(true);
+    try {
+      const runs = await listSessionAgentRuns(sessionId);
+      setAgentRuns(runs);
+      const nextRunId = preferredRunId ?? runs[0]?.run_id ?? null;
+      setSelectedRunId(nextRunId);
+      if (nextRunId) {
+        await loadRunDetail(nextRunId);
+      } else {
+        setSelectedRunDetail(null);
+      }
+    } catch (runsError) {
+      setError(runsError instanceof Error ? runsError.message : "加载 Agent 运行列表失败。");
+    } finally {
+      setLoadingRuns(false);
+    }
+  }
+
+  async function loadRunDetail(runId: string) {
+    setLoadingRunDetail(true);
+    try {
+      const detail = await getAgentRunDetail(runId);
+      setSelectedRunDetail(detail);
+    } catch (detailError) {
+      setError(detailError instanceof Error ? detailError.message : "加载 Agent 轨迹失败。");
+    } finally {
+      setLoadingRunDetail(false);
+    }
+  }
+
+  async function openTraceDrawer() {
+    if (!activeSessionId) {
+      return;
+    }
+    setTraceOpen(true);
+    await refreshAgentRuns(activeSessionId, selectedRunId);
   }
 
   function subscribeReportProgress(reportId: string, sessionId: string) {
@@ -618,6 +697,7 @@ export default function App() {
     setError(null);
 
     try {
+      let latestRunId: string | null = null;
       await streamChat(
         {
           session_id: sessionId,
@@ -662,6 +742,7 @@ export default function App() {
 
           if (event.event === "final") {
             const data = getStreamEventData<AgentResponse>(event);
+            latestRunId = typeof data.debug?.task_run?.run_id === "string" ? data.debug.task_run.run_id : null;
             setMessages((previous) =>
               previous.map((item) =>
                 item.id === assistantId
@@ -689,6 +770,9 @@ export default function App() {
       );
 
       await refreshSessionList(sessionId);
+      if (traceOpen) {
+        await refreshAgentRuns(sessionId, latestRunId);
+      }
     } catch (chatError) {
       setError(chatError instanceof Error ? chatError.message : "对话请求失败。");
       setMessages((previous) =>
@@ -839,6 +923,9 @@ export default function App() {
             {report ? <span className="context-pill">异常指标 {abnormalCount}</span> : null}
             {reportProgress ? <span className="context-pill">解析进度 {progressValue}%</span> : null}
             {summaryHistory.length > 0 ? <span className="context-pill">小结 {summaryHistory.length} 份</span> : null}
+            <button className="context-pill action" type="button" onClick={() => void openTraceDrawer()} disabled={!activeSessionId}>
+              Agent 轨迹
+            </button>
           </div>
 
           <div className="chat-window">
@@ -1181,6 +1268,129 @@ export default function App() {
               ) : null}
             </div>
           </section>
+        </div>
+      ) : null}
+
+      {traceOpen ? (
+        <div className="trace-drawer-backdrop" role="presentation" onClick={() => setTraceOpen(false)}>
+          <aside
+            className="trace-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Agent 轨迹"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="trace-drawer-header">
+              <div>
+                <p className="section-label">Agent Trace</p>
+                <h3>会话运行轨迹</h3>
+              </div>
+              <button className="secondary-button" type="button" onClick={() => setTraceOpen(false)}>
+                关闭
+              </button>
+            </header>
+
+            <div className="trace-drawer-body">
+              <section className="trace-run-list">
+                <div className="trace-panel-head">
+                  <h4>最近运行</h4>
+                  <button
+                    className="link-button"
+                    type="button"
+                    onClick={() => activeSessionId && void refreshAgentRuns(activeSessionId, selectedRunId)}
+                    disabled={!activeSessionId || loadingRuns}
+                  >
+                    刷新
+                  </button>
+                </div>
+                {loadingRuns ? <p className="muted">正在加载运行记录...</p> : null}
+                {!loadingRuns && agentRuns.length === 0 ? <p className="muted">当前会话还没有可查看的运行轨迹。</p> : null}
+                <div className="trace-run-items">
+                  {agentRuns.map((run) => (
+                    <button
+                      key={run.run_id}
+                      type="button"
+                      className={`trace-run-card ${run.run_id === selectedRunId ? "active" : ""}`}
+                      onClick={() => {
+                        setSelectedRunId(run.run_id);
+                        void loadRunDetail(run.run_id);
+                      }}
+                    >
+                      <div className="trace-run-card-top">
+                        <strong>{intentText(run.intent)}</strong>
+                        <span className="trace-status-pill">{runStatusText(run.status)}</span>
+                      </div>
+                      <p className="trace-run-question">{run.user_message}</p>
+                      <div className="trace-run-meta">
+                        <span>{formatRelativeTime(run.started_at)}</span>
+                        <span>{run.cache_status === "hit" ? "缓存命中" : "正常执行"}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="trace-detail-panel">
+                {loadingRunDetail ? <p className="muted">正在加载轨迹详情...</p> : null}
+                {!loadingRunDetail && !selectedRunDetail ? <p className="muted">请选择一条运行记录查看详情。</p> : null}
+                {selectedRunDetail ? (
+                  <div className="trace-detail-stack">
+                    <section className="trace-detail-card">
+                      <div className="trace-panel-head">
+                        <h4>任务概览</h4>
+                      </div>
+                      <div className="trace-kv-grid">
+                        <div>
+                          <span>intent</span>
+                          <strong>{intentText(selectedRunDetail.task_run.intent)}</strong>
+                        </div>
+                        <div>
+                          <span>状态</span>
+                          <strong>{runStatusText(selectedRunDetail.task_run.status)}</strong>
+                        </div>
+                        <div>
+                          <span>缓存</span>
+                          <strong>{selectedRunDetail.task_run.cache_status}</strong>
+                        </div>
+                        <div>
+                          <span>响应模式</span>
+                          <strong>{selectedRunDetail.task_run.response_mode}</strong>
+                        </div>
+                      </div>
+                      <pre className="debug-pre">{formatDebugValue(selectedRunDetail.task_run)}</pre>
+                    </section>
+
+                    {selectedRunDetail.goal ? (
+                      <section className="trace-detail-card">
+                        <div className="trace-panel-head">
+                          <h4>长期目标</h4>
+                        </div>
+                        <pre className="debug-pre">{formatDebugValue(selectedRunDetail.goal)}</pre>
+                      </section>
+                    ) : null}
+
+                    <section className="trace-detail-card">
+                      <div className="trace-panel-head">
+                        <h4>节点轨迹</h4>
+                      </div>
+                      <div className="trace-event-list">
+                        {selectedRunDetail.trace_events.map((event) => (
+                          <article className="trace-event-card" key={event.event_id}>
+                            <div className="trace-event-head">
+                              <span className="trace-event-phase">{tracePhaseText(event.phase)}</span>
+                              <span className="trace-event-step">{event.step_name}</span>
+                              <span className="trace-event-time">{formatRelativeTime(event.created_at)}</span>
+                            </div>
+                            <pre className="debug-pre">{formatDebugValue(event.payload)}</pre>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  </div>
+                ) : null}
+              </section>
+            </div>
+          </aside>
         </div>
       ) : null}
     </main>

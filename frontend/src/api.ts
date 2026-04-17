@@ -1,4 +1,6 @@
 import type {
+  AgentRunDetail,
+  AgentTaskRunSummary,
   ChatStreamEvent,
   KnowledgeSourcesResponse,
   ReportParseResult,
@@ -222,6 +224,16 @@ export async function deleteSession(sessionId: string): Promise<void> {
 export async function getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/messages`);
   return unwrap<SessionMessage[]>(response);
+}
+
+export async function listSessionAgentRuns(sessionId: string): Promise<AgentTaskRunSummary[]> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/agent/runs`);
+  return unwrap<AgentTaskRunSummary[]>(response);
+}
+
+export async function getAgentRunDetail(runId: string): Promise<AgentRunDetail> {
+  const response = await fetch(`${API_BASE}/agent/runs/${runId}`);
+  return unwrap<AgentRunDetail>(response);
 }
 
 export async function getKnowledgeSources(): Promise<KnowledgeSourcesResponse> {
