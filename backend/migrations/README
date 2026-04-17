@@ -1,0 +1,9 @@
+单库项目使用的 Alembic 迁移目录。
+
+常用命令：
+1. `alembic upgrade head`
+2. `alembic revision -m "your message"`
+3. `alembic downgrade -1`
+
+当前项目仍保留 `init_db()` 的 `create_all()` 作为开发环境兜底，
+但后续正式演进应优先通过这里管理 schema 变更。

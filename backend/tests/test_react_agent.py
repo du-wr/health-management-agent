@@ -1,6 +1,7 @@
-from datetime import datetime, timedelta, timezone
+﻿from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.models.entities import ChatMessage, ChatSession, LabItem, Report
@@ -55,6 +56,58 @@ def test_entry_graph_returns_analysis_for_normal_query(monkeypatch) -> None:
         assert entry.analysis is not None
         assert entry.analysis.intent == "term_explanation"
         assert entry.analysis.reason == "graph_route"
+        assert entry.execution is not None
+        assert entry.execution.intent == "term_explanation"
+    finally:
+        llm_service.client = original_client
+
+
+def test_stream_entry_graph_emits_status_and_returns_execution(monkeypatch) -> None:
+    original_client = llm_service.client
+    llm_service.client = object()
+
+    monkeypatch.setattr(routing_service, "route", lambda message, has_report: "term_explanation")
+    monkeypatch.setattr(
+        llm_service,
+        "chat_json_fast",
+        lambda system_prompt, user_prompt: {
+            "intent": "term_explanation",
+            "rewritten_query": "低密度脂蛋白",
+            "normalized_term": "低密度脂蛋白",
+            "use_local_knowledge": True,
+            "use_who": False,
+            "use_max": True,
+            "reason": "stream_graph",
+        },
+    )
+
+    try:
+        with make_session() as session:
+            chat_session = ChatSession(title="stream-entry")
+            session.add(chat_session)
+            session.commit()
+            session.refresh(chat_session)
+
+            entry_stream = react_agent_service._stream_entry_graph(
+                session=session,
+                session_id=chat_session.id,
+                report_id=None,
+                message="解释一下低密度脂蛋白",
+            )
+            labels: list[str] = []
+            while True:
+                try:
+                    labels.append(next(entry_stream))
+                except StopIteration as stop:
+                    entry = stop.value
+                    break
+
+        assert "读取上下文中" in labels
+        assert "进行安全检查" in labels
+        assert "分析问题中" in labels
+        assert "整理术语解释" in labels
+        assert "检索本地知识中" in labels
+        assert entry is not None
         assert entry.execution is not None
         assert entry.execution.intent == "term_explanation"
     finally:
@@ -620,10 +673,13 @@ def test_stream_respond_emits_incremental_deltas_before_final(monkeypatch) -> No
 
         delta_events = [event for event in events if event["event"] == "delta"]
         final_index = next(index for index, event in enumerate(events) if event["event"] == "final")
+        status_labels = [event["data"]["label"] for event in events if event["event"] == "status"]
 
         assert [event["data"]["text"] for event in delta_events] == ["Streaming ", "answer"]
         assert delta_events
         assert events.index(delta_events[-1]) < final_index
+        assert status_labels.count("检索本地知识中") == 1
+        assert "生成回答中" in status_labels
         assert next(event for event in events if event["event"] == "final")["data"]["answer"].startswith("Streaming answer")
     finally:
         llm_service.client = original_client
@@ -775,6 +831,53 @@ def test_term_explanation_can_use_standardized_who_query(monkeypatch) -> None:
         assert "甲状腺功能亢进" in queries
         assert "lookup_icd11" in response.used_tools
         assert "来源于 WHO ICD-11" in response.answer
+    finally:
+        llm_service.client = original_client
+
+
+def test_term_explanation_gracefully_skips_who_timeout(monkeypatch, caplog) -> None:
+    original_client = llm_service.client
+    llm_service.client = object()
+
+    monkeypatch.setattr(routing_service, "route", lambda message, has_report: "term_explanation")
+    monkeypatch.setattr(who_service, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        react_agent_service,
+        "_lookup_who_with_candidates",
+        lambda message, docs: (_ for _ in ()).throw(httpx.ConnectTimeout("who timeout")),
+    )
+    monkeypatch.setattr(
+        llm_service,
+        "chat_text_max",
+        lambda system_prompt, user_prompt: (
+            "### 它是什么\n"
+            "流感通常是由流感病毒引起的急性呼吸道感染。\n\n"
+            "### 常见表现或特点\n"
+            "常见表现包括发热、咽痛、咳嗽和肌肉酸痛。\n\n"
+            "### 常见诱因或易感因素\n"
+            "在流感季节、密切接触病例时更容易感染。\n\n"
+            "### 什么时候需要就医\n"
+            "若持续高热、呼吸困难或症状明显加重，建议尽快就医。\n\n"
+            "### 温馨提示\n"
+            "应结合症状持续时间和基础疾病情况综合判断。"
+        ),
+    )
+
+    try:
+        with make_session() as session:
+            knowledge_service.seed_local_knowledge(session)
+            with caplog.at_level("WARNING"):
+                response = react_agent_service.respond(
+                    session=session,
+                    session_id=None,
+                    report_id=None,
+                    message="流感是什么",
+                    output_dir=Path("."),
+                )
+
+        assert response.intent == "term_explanation"
+        assert "lookup_icd11" not in response.used_tools
+        assert "WHO ICD-11 lookup skipped for query=流感是什么" in caplog.text
     finally:
         llm_service.client = original_client
 

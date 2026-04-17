@@ -1,15 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.agent_graph.graph import build_entry_graph
+from app.agent_graph.graph import build_compose_graph, build_entry_graph
 from app.core.config import get_settings
 from app.core.schemas import AgentDebug, AgentResponse, Citation
 from app.models.entities import ChatMessage, ChatSession
@@ -110,9 +110,10 @@ class ReportSynthesisResult(BaseModel):
 
 
 class AgentEntryResult(BaseModel):
-    """LangGraph 鍏ュ彛鍥剧殑绠€鍖栬緭鍑恒€?
-    杩欏眰鍙礋璐ｆ槸鍚﹂渶瑕佺珛鍗崇粨鏉熶互鍙婅繖杞殑鎰忓浘鍒嗘祦锛?
-    鍥炵瓟鐢熸垚銆佺紦瀛樺拰钀藉簱浠嶇劧娌跨敤鍘熸湁閫昏緫锛岄伩鍏嶄竴娆℃€ф敼鍔ㄨ繃澶с€?
+    """LangGraph 入口图的简化输出。
+
+    这一层只负责是否需要立刻结束，以及这轮要走哪条主路径。
+    回答生成、缓存和落库仍沿用后续链路，避免一次性把风险放大。
     """
 
     conversation_history: list[dict[str, str]] = Field(default_factory=list)
@@ -131,6 +132,7 @@ class ReactAgentService:
         self.answer_cache: dict[str, AgentExecutionResult] = {}
 
         self.entry_graph = build_entry_graph(self)
+        self.compose_graph = build_compose_graph(self)
 
     def respond(
         self,
@@ -148,16 +150,12 @@ class ReactAgentService:
         # 4. 命中缓存则直接复用
         # 5. 否则执行完整 Agent 主链
         # 6. 落助手消息并返回
-        # 流式接口和同步接口使用同一条业务链，只是输出方式不同。
-        # 这里会把执行过程拆成 session / status / delta / final 四类事件。
-        # 流式接口和同步接口使用同一条业务链，只是输出方式不同。
-        # 这里会把执行过程拆成 session / status / delta / final 四类事件。
         chat_session = self._get_or_create_session(session, session_id, report_id, message)
         # 如果这是一个空白新会话的首轮提问，就把标题自动改成问题摘要，
         # 这样左侧会话列表不会永远显示“新对话”。
         session_service.auto_title_if_needed(session, chat_session.id, message)
         self._store_message(session, chat_session.id, "user", message)
-        # 鍏ュ彛鍥惧厛鍋氫笂涓嬫枃鍔犺浇銆佸畨鍏ㄦ妤€鏌ャ€佹姤鍛婄姸鎬佸垽鏂拰鎰忓浘鍒嗘祦銆?
+        # 入口图先处理上下文加载、安全检查、报告状态判断和意图分流。
         entry_result = self._run_entry_graph(session, chat_session.id, report_id, message)
         if entry_result.immediate_response:
             self._store_message(
@@ -202,15 +200,7 @@ class ReactAgentService:
                 conversation_history=entry_result.conversation_history,
                 analysis=entry_result.analysis,
             )
-            execution.answer = self._compose_answer(
-                intent=execution.intent,
-                message=execution.message,
-                conversation_history=execution.conversation_history,
-                tool_outputs=execution.tool_outputs,
-                citations=execution.citations,
-                used_tools=execution.used_tools,
-                use_max=execution.use_max,
-            )
+            execution.answer = self._run_compose_graph(execution)
             self.answer_cache[cache_key] = execution
 
         response = self._build_agent_response(chat_session.id, execution)
@@ -244,9 +234,15 @@ class ReactAgentService:
         self._store_message(session, chat_session.id, "user", message)
         yield {"event": "session", "data": {"session_id": chat_session.id}}
 
-        entry_result = self._run_entry_graph(session, chat_session.id, report_id, message)
+        entry_stream = self._stream_entry_graph(session, chat_session.id, report_id, message)
+        while True:
+            try:
+                status_label = next(entry_stream)
+            except StopIteration as stop:
+                entry_result = stop.value
+                break
+            yield {"event": "status", "data": {"label": status_label}}
         if entry_result.immediate_response:
-            yield {"event": "status", "data": {"label": "已完成安全检查"}}
             for chunk in self._chunk_text(entry_result.immediate_response.answer):
                 yield {"event": "delta", "data": {"text": chunk}}
             self._store_message(
@@ -261,7 +257,6 @@ class ReactAgentService:
             yield {"event": "final", "data": entry_result.immediate_response.model_dump(mode="json")}
             return
 
-        yield {"event": "status", "data": {"label": "分析问题中"}}
         cache_key = self._cache_key(chat_session.id, report_id, message)
         cached_response = self._load_cached_response(session, cache_key, chat_session.id)
         if cached_response:
@@ -280,7 +275,8 @@ class ReactAgentService:
             yield {"event": "final", "data": cached_response.model_dump(mode="json")}
             return
 
-        execution = entry_result.execution or self._prepare_fast_path(
+        graph_prepared_execution = entry_result.execution
+        execution = graph_prepared_execution or self._prepare_fast_path(
             session,
             chat_session.id,
             report_id,
@@ -288,27 +284,18 @@ class ReactAgentService:
             conversation_history=entry_result.conversation_history,
             analysis=entry_result.analysis,
         )
-        for tool in execution.used_tools:
-            yield {"event": "status", "data": {"label": self._tool_status_label(tool)}}
-        yield {"event": "status", "data": {"label": "生成回答中"}}
-
-        # 娴佸紡鍦烘櫙涓嬮渶瑕佽竟鐢熸垚杈规帹閫乨elta锛屼絾缁撴潫鏃朵粛瑕佹敹鍙栧畬鏁寸瓟妗堢敤浜庣紦瀛樺拰钀藉簱銆?
-        stream_generator = self._stream_compose_answer(
-            intent=execution.intent,
-            message=execution.message,
-            conversation_history=execution.conversation_history,
-            tool_outputs=execution.tool_outputs,
-            citations=execution.citations,
-            used_tools=execution.used_tools,
-            use_max=execution.use_max,
-        )
+        # 已经由 LangGraph 准备节点发过阶段状态的场景，这里不再重复补一轮工具状态。
+        if graph_prepared_execution is None or self._should_emit_tool_statuses_after_entry(execution):
+            for tool in execution.used_tools:
+                yield {"event": "status", "data": {"label": self._tool_status_label(tool)}}
+        compose_stream = self._stream_compose_graph(execution)
         while True:
             try:
-                chunk = next(stream_generator)
+                compose_event = next(compose_stream)
             except StopIteration as stop:
                 execution.answer = stop.value or ""
                 break
-            yield {"event": "delta", "data": {"text": chunk}}
+            yield compose_event
         self.answer_cache[cache_key] = execution
         response = self._build_agent_response(chat_session.id, execution)
         self._save_cached_response(session, cache_key, report_id, message, response)
@@ -330,9 +317,10 @@ class ReactAgentService:
         report_id: str | None,
         message: str,
     ) -> AgentEntryResult:
-        """杩愯 LangGraph 鍏ュ彛鍥俱€?
-        濡傛灉鍥惧湪褰撳墠鐜鎴栬姹傞噷鍑虹幇寮傚父锛屽氨绔嬪嵆閫€鍥炲埌鍘熸湁鍏ュ彛閫昏緫锛?
-        閬垮厤鍥犱负鏋舵瀯鍗囩骇褰卞搷鍒板凡缁忔甯稿伐浣滅殑鍔熻兘銆?
+        """运行 LangGraph 入口图。
+
+        如果图在当前环境或请求里出现异常，就立刻退回到原有入口逻辑，
+        避免因为架构升级影响到已经正常工作的功能。
         """
         conversation_history = self._recent_conversation_context(session, session_id)
         try:
@@ -365,8 +353,175 @@ class ReactAgentService:
                 execution=None,
             )
 
+    def _run_compose_graph(self, execution: AgentExecutionResult) -> str:
+        """通过生成图统一执行同步答案生成。"""
+        try:
+            state = self.compose_graph.invoke(self._compose_graph_input(execution, stream=False))
+            answer_text = state.get("answer_text") if isinstance(state, dict) else None
+            if isinstance(answer_text, str) and answer_text.strip():
+                return answer_text
+        except Exception:
+            logger.exception("Compose graph invoke failed, fallback to direct composition")
+        return self._compose_answer(
+            intent=execution.intent,
+            message=execution.message,
+            conversation_history=execution.conversation_history,
+            tool_outputs=execution.tool_outputs,
+            citations=execution.citations,
+            used_tools=execution.used_tools,
+            use_max=execution.use_max,
+        )
+
+    def _stream_entry_graph(
+        self,
+        session: Session,
+        session_id: str,
+        report_id: str | None,
+        message: str,
+    ) -> Iterator[str]:
+        """流式执行入口图，并把节点状态映射成前端文案。"""
+        conversation_history = self._recent_conversation_context(session, session_id)
+        accumulated_state: dict[str, Any] = {"conversation_history": conversation_history}
+        last_status_label: str | None = None
+        try:
+            for update in self.entry_graph.stream(
+                {
+                    "session": session,
+                    "chat_session_id": session_id,
+                    "report_id": report_id,
+                    "message": message,
+                },
+                stream_mode=["updates", "custom"],
+            ):
+                stream_mode = "updates"
+                payload = update
+                if isinstance(update, tuple) and len(update) == 2:
+                    stream_mode, payload = update
+                if stream_mode == "custom":
+                    status_label = self._graph_custom_status_label(payload)
+                    if status_label and status_label != last_status_label:
+                        last_status_label = status_label
+                        yield status_label
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                for node_name, partial_state in payload.items():
+                    if isinstance(partial_state, dict):
+                        accumulated_state.update(partial_state)
+                    status_label = self._entry_graph_status_label(str(node_name))
+                    if status_label and status_label != last_status_label:
+                        last_status_label = status_label
+                        yield status_label
+            return AgentEntryResult(
+                conversation_history=accumulated_state.get("conversation_history") or conversation_history,
+                analysis=accumulated_state.get("analysis"),
+                immediate_response=accumulated_state.get("immediate_response"),
+                execution=(
+                    AgentExecutionResult.model_validate(accumulated_state["execution_data"])
+                    if accumulated_state.get("execution_data")
+                    else None
+                ),
+            )
+        except Exception:
+            logger.exception("Entry graph streaming failed, fallback to non-streaming entry path")
+            return self._run_entry_graph(session, session_id, report_id, message)
+
+    def _stream_compose_graph(self, execution: AgentExecutionResult) -> Iterator[dict[str, Any]]:
+        """通过生成图统一执行流式答案生成。"""
+        answer_text = ""
+        try:
+            for update in self.compose_graph.stream(
+                self._compose_graph_input(execution, stream=True),
+                stream_mode=["updates", "custom"],
+            ):
+                stream_mode = "updates"
+                payload = update
+                if isinstance(update, tuple) and len(update) == 2:
+                    stream_mode, payload = update
+                if stream_mode == "custom":
+                    event = self._graph_custom_stream_event(payload)
+                    if event:
+                        yield event
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                for partial_state in payload.values():
+                    if isinstance(partial_state, dict) and isinstance(partial_state.get("answer_text"), str):
+                        answer_text = partial_state["answer_text"]
+            return answer_text
+        except Exception:
+            logger.exception("Compose graph streaming failed, fallback to direct streaming path")
+            yield {"event": "status", "data": {"label": "生成回答中"}}
+            stream_generator = self._stream_compose_answer(
+                intent=execution.intent,
+                message=execution.message,
+                conversation_history=execution.conversation_history,
+                tool_outputs=execution.tool_outputs,
+                citations=execution.citations,
+                used_tools=execution.used_tools,
+                use_max=execution.use_max,
+            )
+            while True:
+                try:
+                    chunk = next(stream_generator)
+                except StopIteration as stop:
+                    return stop.value or ""
+                yield {"event": "delta", "data": {"text": chunk}}
+
+    def _entry_graph_status_label(self, node_name: str) -> str | None:
+        """把入口图节点名转换成前端可读文案。"""
+        return {
+            "load_context": "读取上下文中",
+            "safety_gate": "进行安全检查",
+            "report_gate": "核对报告状态",
+            "route_intent": "分析问题中",
+            "prepare_collect_more_info": "整理追问信息",
+            "prepare_report_follow_up": "准备报告解读",
+            "prepare_term_explanation": "整理术语解释",
+            "prepare_retrieval": "检索相关知识中",
+        }.get(node_name)
+
+    def _graph_custom_status_label(self, payload: Any) -> str | None:
+        """解析图节点内部主动发出的自定义状态。"""
+        if isinstance(payload, dict):
+            label = payload.get("label")
+            return str(label) if label else None
+        if isinstance(payload, str):
+            return payload
+        return None
+
+    def _graph_custom_stream_event(self, payload: Any) -> dict[str, Any] | None:
+        """把生成图的自定义流事件转换成前端 SSE 事件。"""
+        if not isinstance(payload, dict):
+            return None
+        event_type = payload.get("type")
+        if event_type == "status":
+            label = payload.get("label")
+            return {"event": "status", "data": {"label": str(label)}} if label else None
+        if event_type == "delta":
+            text = payload.get("text")
+            return {"event": "delta", "data": {"text": str(text)}} if text else None
+        return None
+
+    def _compose_graph_input(self, execution: AgentExecutionResult, *, stream: bool) -> dict[str, Any]:
+        """把执行结果转换成生成图的输入状态。"""
+        return {
+            "intent": execution.intent,
+            "message": execution.message,
+            "conversation_history": execution.conversation_history,
+            "tool_outputs": execution.tool_outputs,
+            "citations": [citation.model_dump(mode="json") for citation in execution.citations],
+            "used_tools": execution.used_tools,
+            "use_max": execution.use_max,
+            "stream": stream,
+        }
+
+    def _citations_from_graph_state(self, citations: list[dict[str, Any]] | None) -> list[Citation]:
+        """把图状态里的引用字典恢复成 Citation 对象。"""
+        return [Citation.model_validate(item) for item in (citations or [])]
+
     def _build_safety_handoff_response(self, session_id: str, reason: str | None) -> AgentResponse:
-        """鎶婂畨鍏ㄩ檷绾ф剰瑙佺粺涓€缁勮鎴愬彲鐩存帴杩斿洖鐨?AgentResponse銆?"""
+        """把安全降级意见统一组装成可直接返回的 AgentResponse。"""
         answer = f"{reason or '当前问题涉及高风险医疗决策。'}\n\n请尽快联系医生或线下医疗机构获取专业评估。"
         return AgentResponse(
             session_id=session_id,
@@ -380,7 +535,7 @@ class ReactAgentService:
         )
 
     def _build_report_not_ready_response(self, session_id: str, parse_status: str) -> AgentResponse:
-        """鎶婃姤鍛婃湭瀹屾垚鐨勫満鏅粺涓€缁勮锛岄伩鍏嶅澶勫垎鏀悇鑷啓涓€閬嶆枃妗堛€?"""
+        """统一组装报告未完成场景的回复，避免多处分支重复写文案。"""
         answer = "报告还在后台解析中，等解析完成后我再为你解读。" if parse_status != "error" else "报告解析失败，建议重新上传更清晰的文件。"
         return AgentResponse(
             session_id=session_id,
@@ -523,16 +678,25 @@ class ReactAgentService:
         conversation_history: list[dict[str, str]],
         message: str,
         analysis: InputAnalysisResult,
+        status_emitter: Callable[[str], None] | None = None,
     ) -> AgentExecutionResult:
         """组装报告追问场景的结构化执行结果。"""
         if not report_id:
             return self._build_collect_more_info_execution(conversation_history, message, analysis)
+        if status_emitter:
+            status_emitter("读取报告内容中")
         report = report_service.get_report(session, report_id)
         seed_focus_items = [item.model_dump(mode="json") for item in (report.abnormal_items[:8] or report.items[:8])]
         related_items = [item.model_dump(mode="json") for item in report.items[:12]]
+        if status_emitter:
+            status_emitter("规划报告解读中")
         plan = self._plan_report_follow_up(message, conversation_history, seed_focus_items, related_items)
         focus_items = self._select_focus_items_from_plan(plan, seed_focus_items, related_items)
+        if status_emitter:
+            status_emitter("解释异常指标中")
         interpretations, citations = self._interpret_lab_batch(session, focus_items, related_items)
+        if status_emitter:
+            status_emitter("生成综合结论中")
         synthesis = self._build_report_synthesis(message, plan, interpretations, related_items)
         return AgentExecutionResult(
             intent="report_follow_up",
@@ -570,10 +734,13 @@ class ReactAgentService:
         conversation_history: list[dict[str, str]],
         message: str,
         analysis: InputAnalysisResult,
+        status_emitter: Callable[[str], None] | None = None,
     ) -> AgentExecutionResult:
         """组装普通知识检索场景的结构化执行结果。"""
         effective_query = analysis.rewritten_query or message
         tool_name = "query_drug" if any(token in effective_query for token in DRUG_KEYWORDS) else "retrieve_knowledge"
+        if status_emitter and analysis.use_local_knowledge:
+            status_emitter(self._tool_status_label(tool_name))
         docs = knowledge_service.retrieve(session, effective_query) if analysis.use_local_knowledge else []
         return AgentExecutionResult(
             intent=analysis.intent,
@@ -735,10 +902,13 @@ class ReactAgentService:
         conversation_history: list[dict[str, str]],
         message: str,
         analysis: InputAnalysisResult,
+        status_emitter: Callable[[str], None] | None = None,
     ) -> AgentExecutionResult:
         """处理医学名词解释。优先本地知识，其次 WHO，最后再由模型润色。"""
         # 术语解释优先用“改写后或标准化后的术语”去查资料，而不是死磕用户原话。
         effective_query = analysis.rewritten_query or analysis.normalized_term or self._strip_question_tail(message)
+        if status_emitter and analysis.use_local_knowledge:
+            status_emitter("检索本地知识中")
         docs = knowledge_service.retrieve(session, effective_query) if analysis.use_local_knowledge else []
         if not docs and effective_query != message:
             docs = knowledge_service.retrieve(session, message)
@@ -748,6 +918,8 @@ class ReactAgentService:
 
         if analysis.use_who and who_service.is_configured():
             try:
+                if status_emitter:
+                    status_emitter("检索 WHO ICD-11 中")
                 who_result = self._lookup_who_with_candidates(analysis.normalized_term or effective_query or message, docs)
                 if who_result.get("matches"):
                     tool_outputs.append({"tool": "lookup_icd11", "result": who_result})
@@ -755,8 +927,8 @@ class ReactAgentService:
                     citations.extend(self._who_citations(who_result))
                 else:
                     logger.info("WHO ICD-11 returned no match for message=%s", message)
-            except Exception:
-                logger.exception("WHO ICD-11 lookup failed for query=%s", message)
+            except Exception as exc:
+                logger.warning("WHO ICD-11 lookup skipped for query=%s: %s", message, exc)
         elif analysis.use_who:
             logger.info("WHO ICD-11 skipped because credentials are not configured")
 
@@ -1310,6 +1482,11 @@ class ReactAgentService:
             "lookup_icd11": "检索 WHO ICD-11 中",
             "query_drug": "整理药物科普信息中",
         }.get(tool, f"执行工具中：{tool}")
+
+    def _should_emit_tool_statuses_after_entry(self, execution: AgentExecutionResult) -> bool:
+        """判断流式主链在图准备阶段结束后，是否还需要补发工具状态。"""
+        intents_with_graph_status = {"report_follow_up", "term_explanation", "symptom_rag_advice"}
+        return execution.intent not in intents_with_graph_status
 
     def _recent_conversation_context(self, session: Session, session_id: str) -> list[dict[str, str]]:
         """读取最近 N 条对话，作为短期上下文。"""

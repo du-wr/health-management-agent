@@ -535,8 +535,30 @@ a {
   justify-content: flex-start;
 }
 
+.message-header-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .message-time {
   font-size: 12px;
+}
+
+.message-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.message-badge.cache-hit {
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
 }
 
 .message-bubble {
@@ -633,6 +655,29 @@ a {
   border-radius: 999px;
   background: var(--accent);
   animation: status-pulse 1.2s ease infinite;
+}
+
+.cache-hit-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(100%, 720px);
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(15, 118, 110, 0.08);
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  color: #115e59;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.cache-hit-icon {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #0f766e;
+  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.14);
 }
 
 .typing-line {

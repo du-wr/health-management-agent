@@ -24,8 +24,26 @@ class WHOService:
         self._token_expiry: datetime | None = None
 
     def is_configured(self) -> bool:
-        """只有配置了 client id 和 client secret 才允许发起 WHO 请求。"""
-        return bool(self.settings.who_client_id and self.settings.who_client_secret)
+        """只有显式开启且配置了凭据时，才允许发起 WHO 请求。"""
+        return bool(
+            self.settings.who_enabled
+            and self.settings.who_client_id
+            and self.settings.who_client_secret
+        )
+
+    def _build_timeout(self) -> httpx.Timeout:
+        """构建 WHO 请求使用的超时配置。"""
+        total = max(float(self.settings.who_timeout_seconds), 1.0)
+        connect = max(float(self.settings.who_connect_timeout_seconds), 0.5)
+        connect = min(connect, total)
+        return httpx.Timeout(total, connect=connect)
+
+    def _build_client(self) -> httpx.Client:
+        """构建 WHO 请求客户端。"""
+        return httpx.Client(
+            timeout=self._build_timeout(),
+            trust_env=self.settings.who_trust_env,
+        )
 
     def _get_token(self) -> str:
         """获取并缓存 WHO 的访问令牌。"""
@@ -36,12 +54,12 @@ class WHOService:
         if self._access_token and self._token_expiry and self._token_expiry > now:
             return self._access_token
 
-        response = httpx.post(
-            "https://icdaccessmanagement.who.int/connect/token",
-            auth=(self.settings.who_client_id, self.settings.who_client_secret),
-            data={"grant_type": "client_credentials", "scope": "icdapi_access"},
-            timeout=20.0,
-        )
+        with self._build_client() as client:
+            response = client.post(
+                "https://icdaccessmanagement.who.int/connect/token",
+                auth=(self.settings.who_client_id, self.settings.who_client_secret),
+                data={"grant_type": "client_credentials", "scope": "icdapi_access"},
+            )
         response.raise_for_status()
         payload = response.json()
         self._access_token = payload["access_token"]
@@ -56,17 +74,17 @@ class WHOService:
             return {"query": query, "matches": []}
 
         token = self._get_token()
-        response = httpx.get(
-            "https://id.who.int/icd/release/11/2025-01/mms/search",
-            params={"q": query},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "Accept-Language": language,
-                "API-Version": "v2",
-            },
-            timeout=20.0,
-        )
+        with self._build_client() as client:
+            response = client.get(
+                "https://id.who.int/icd/release/11/2025-01/mms/search",
+                params={"q": query},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "Accept-Language": language,
+                    "API-Version": "v2",
+                },
+            )
         response.raise_for_status()
         payload = response.json()
         raw_matches = payload.get("destinationEntities", [])[:limit]
@@ -93,16 +111,16 @@ class WHOService:
         if not uri:
             return {}
         entity_url = uri.replace("http://", "https://")
-        response = httpx.get(
-            entity_url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "Accept-Language": language,
-                "API-Version": "v2",
-            },
-            timeout=20.0,
-        )
+        with self._build_client() as client:
+            response = client.get(
+                entity_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "Accept-Language": language,
+                    "API-Version": "v2",
+                },
+            )
         response.raise_for_status()
         payload = response.json()
         return {
@@ -113,7 +131,7 @@ class WHOService:
         }
 
     def _extract_values(self, value: Any) -> list[str]:
-        """把 WHO 结果里可能很嵌套的字段拉平为字符串列表。"""
+        """把 WHO 结果里可能很嵌套的字段拉平成字符串列表。"""
         if value is None:
             return []
         if isinstance(value, str):

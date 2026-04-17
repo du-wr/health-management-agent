@@ -8,14 +8,17 @@ version = "0.1.0"
 description = "Medical checkup report interpretation and health consultation backend"
 requires-python = ">=3.11"
 dependencies = [
+  "alembic>=1.14.1",
   "fastapi>=0.115.6",
   "httpx>=0.28.1",
   "langgraph>=0.2.0",
+  "pymysql>=1.1.1",
   "openai>=1.58.1",
   "pdfplumber>=0.11.5",
   "psycopg[binary]>=3.2.3",
   "pydantic-settings>=2.7.0",
   "python-multipart>=0.0.20",
+  "redis>=5.2.1",
   "reportlab>=4.2.5",
   "sqlmodel>=0.0.22",
   "uvicorn>=0.34.0",

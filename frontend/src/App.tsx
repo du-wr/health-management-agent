@@ -35,6 +35,7 @@ type MessageRow = {
   citations?: Citation[];
   meta?: AgentResponse;
   statusLabel?: string | null;
+  cacheHit?: boolean;
   streaming?: boolean;
   createdAt?: string;
 };
@@ -630,9 +631,18 @@ export default function App() {
 
           if (event.event === "status") {
             const data = getStreamEventData<{ label: string }>(event);
+            const cacheHit = data.label.includes("命中缓存");
             setMessages((previous) =>
               previous.map((item) =>
-                item.id === assistantId ? { ...item, statusLabel: data.label, streaming: true } : item,
+                item.id === assistantId
+                  ? {
+                      ...item,
+                      // “命中缓存”需要保留在消息上，避免后续 delta/final 把这条提示冲掉。
+                      cacheHit: item.cacheHit || cacheHit,
+                      statusLabel: data.label,
+                      streaming: true,
+                    }
+                  : item,
               ),
             );
             return;
@@ -854,8 +864,18 @@ export default function App() {
               <article className={`message ${message.role}`} key={message.id}>
                 <div className="message-header">
                   <span className="message-role">{message.role === "assistant" ? "医疗助手" : "你"}</span>
-                  {message.createdAt ? <span className="message-time">{formatRelativeTime(message.createdAt)}</span> : null}
+                  <div className="message-header-meta">
+                    {message.cacheHit ? <span className="message-badge cache-hit">命中缓存</span> : null}
+                    {message.createdAt ? <span className="message-time">{formatRelativeTime(message.createdAt)}</span> : null}
+                  </div>
                 </div>
+
+                {message.cacheHit ? (
+                  <div className="cache-hit-banner" aria-live="polite">
+                    <span className="cache-hit-icon" aria-hidden="true" />
+                    <span>这条回答直接复用了历史结果，因此返回会更快。</span>
+                  </div>
+                ) : null}
 
                 <div className="message-bubble">
                   {message.role === "assistant" ? (

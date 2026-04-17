@@ -7,7 +7,7 @@ from sqlmodel import Session
 
 from app.api.routes import router
 from app.core.config import get_settings
-from app.core.database import engine, init_db
+from app.core.database import engine, ensure_database_ready
 from app.services.knowledge_service import knowledge_service
 from app.worker import run_worker
 
@@ -51,7 +51,7 @@ app.include_router(router, prefix="/api")
 @app.on_event("startup")
 def on_startup() -> None:
     """应用启动时初始化数据库、知识库，并按需启动内嵌解析 worker。"""
-    init_db()
+    ensure_database_ready()
     with Session(engine) as session:
         knowledge_service.ensure_initialized(session)
     _start_embedded_worker_if_needed()

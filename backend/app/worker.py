@@ -7,7 +7,7 @@ import time
 from sqlmodel import Session
 
 from app.core.config import get_settings
-from app.core.database import engine, init_db
+from app.core.database import engine, ensure_database_ready
 from app.services.knowledge_service import knowledge_service
 from app.services.report_queue_service import report_queue_service
 from app.services.report_service import report_service
@@ -21,7 +21,7 @@ _embedded_worker_thread: threading.Thread | None = None
 def run_worker() -> None:
     """持续消费报告解析队列。"""
     settings = get_settings()
-    init_db()
+    ensure_database_ready()
     with Session(engine) as session:
       knowledge_service.ensure_initialized(session)
 
