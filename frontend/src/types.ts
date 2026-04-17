@@ -50,6 +50,11 @@ export interface AgentDebug {
   analysis?: Record<string, unknown>;
   plan?: Record<string, unknown>;
   synthesis?: Record<string, unknown>;
+  replan?: Record<string, unknown>;
+  memory?: Record<string, unknown>;
+  goal?: Record<string, unknown>;
+  task_run?: Record<string, unknown>;
+  trace_summary?: Array<Record<string, unknown>>;
 }
 
 export interface AgentResponse {
@@ -98,6 +103,7 @@ export interface SessionDetail {
 
 export interface SessionMessage {
   message_id: string;
+  agent_run_id?: string | null;
   role: string;
   content: string;
   intent?: string | null;

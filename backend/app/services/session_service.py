@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 
 from app.core.schemas import Citation, SessionDetail, SessionMessage, SessionReportInfo, SessionSummary
 from app.models.entities import ChatMessage, ChatSession, Report, SummaryArtifact
+from app.services.agent_memory_service import agent_memory_service
 
 
 class SessionService:
@@ -60,6 +61,7 @@ class SessionService:
         chat_session.report_id = report_id
         session.add(chat_session)
         session.commit()
+        agent_memory_service.bind_session_report(session, session_id, report_id)
         session.refresh(chat_session)
         return self._build_session_detail(session, chat_session)
 
@@ -182,6 +184,7 @@ class SessionService:
                 continue
         return SessionMessage(
             message_id=message.id,
+            agent_run_id=message.agent_run_id,
             role=message.role,
             content=message.content,
             intent=message.intent,

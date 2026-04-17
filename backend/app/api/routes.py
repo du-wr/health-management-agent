@@ -9,6 +9,8 @@ from sqlmodel import Session, select
 from app.core.config import get_settings
 from app.core.database import engine, get_session
 from app.core.schemas import (
+    AgentRunDetail,
+    AgentTaskRunSummary,
     AgentResponse,
     ChatRequest,
     KnowledgeDoc,
@@ -24,6 +26,7 @@ from app.core.schemas import (
 )
 from app.models.entities import SummaryArtifact as SummaryArtifactEntity
 from app.services.knowledge_service import knowledge_service
+from app.services.agent_runtime_service import agent_runtime_service
 from app.services.react_agent import react_agent_service
 from app.services.report_progress_service import report_progress_service
 from app.services.report_queue_service import report_queue_service
@@ -106,6 +109,25 @@ def get_session_messages(session_id: str, session: Session = Depends(get_session
     """返回一个会话下的历史消息列表。"""
     try:
         return session_service.list_messages(session, session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}/agent/runs", response_model=list[AgentTaskRunSummary])
+def list_session_agent_runs(session_id: str, session: Session = Depends(get_session)) -> list[AgentTaskRunSummary]:
+    """返回当前会话最近的 Agent 运行记录。"""
+    try:
+        session_service.get_session_entity(session, session_id)
+        return agent_runtime_service.list_session_runs(session, session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/agent/runs/{run_id}", response_model=AgentRunDetail)
+def get_agent_run_detail(run_id: str, session: Session = Depends(get_session)) -> AgentRunDetail:
+    """返回一次 Agent 运行的完整轨迹详情。"""
+    try:
+        return agent_runtime_service.get_run_detail(session, run_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

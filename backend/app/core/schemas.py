@@ -68,6 +68,11 @@ class AgentDebug(BaseModel):
     analysis: dict[str, object] = Field(default_factory=dict)
     plan: dict[str, object] = Field(default_factory=dict)
     synthesis: dict[str, object] = Field(default_factory=dict)
+    replan: dict[str, object] = Field(default_factory=dict)
+    memory: dict[str, object] = Field(default_factory=dict)
+    goal: dict[str, object] = Field(default_factory=dict)
+    task_run: dict[str, object] = Field(default_factory=dict)
+    trace_summary: list[dict[str, object]] = Field(default_factory=list)
 
 
 class AgentResponse(BaseModel):
@@ -122,12 +127,93 @@ class SessionDetail(BaseModel):
 class SessionMessage(BaseModel):
     """会话历史消息的接口表达。"""
     message_id: str
+    agent_run_id: str | None = None
     role: str
     content: str
     intent: str | None = None
     safety_level: str = "safe"
     citations: list[Citation] = Field(default_factory=list)
     created_at: datetime
+
+
+class AgentGoalSummary(BaseModel):
+    """会话里的一个长期目标摘要。"""
+
+    goal_id: str
+    session_id: str
+    report_id: str | None = None
+    goal_type: str
+    title: str
+    status: str
+    source_intent: str | None = None
+    latest_user_message: str = ""
+    last_run_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentTaskRunSummary(BaseModel):
+    """一次 Agent 运行的摘要。"""
+
+    run_id: str
+    session_id: str
+    goal_id: str | None = None
+    report_id: str | None = None
+    user_message: str
+    status: str
+    intent: str | None = None
+    response_mode: str
+    cache_status: str
+    handoff_required: bool = False
+    answer_excerpt: str = ""
+    used_tools: list[str] = Field(default_factory=list)
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class AgentTraceEventRecord(BaseModel):
+    """一次运行中的单条轨迹事件。"""
+
+    event_id: str
+    run_id: str
+    sequence_no: int
+    phase: str
+    step_name: str
+    status: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AgentRunDetail(BaseModel):
+    """调试页使用的一次 Agent 运行详情。"""
+
+    task_run: AgentTaskRunSummary
+    goal: AgentGoalSummary | None = None
+    trace_events: list[AgentTraceEventRecord] = Field(default_factory=list)
+
+
+class SessionMemoryRecord(BaseModel):
+    """会话级长期记忆摘要。"""
+
+    session_id: str
+    report_id: str | None = None
+    latest_run_id: str | None = None
+    summary_text: str
+    focus_points: list[str] = Field(default_factory=list)
+    latest_intent: str | None = None
+    message_count: int = 0
+    updated_at: datetime
+
+
+class ReportInsightRecord(BaseModel):
+    """报告级长期洞察。"""
+
+    report_id: str
+    parse_status: str
+    abnormal_item_names: list[str] = Field(default_factory=list)
+    key_findings: list[str] = Field(default_factory=list)
+    monitoring_summary: str = ""
+    updated_at: datetime
 
 
 class ChatRequest(BaseModel):

@@ -16,6 +16,8 @@ from app.models.entities import ChatMessage, ChatSession
 from app.services.cache_service import cache_service
 from app.services.knowledge_service import knowledge_service
 from app.services.llm import llm_service
+from app.services.agent_runtime_service import AgentRuntimeContext, agent_runtime_service
+from app.services.agent_memory_service import agent_memory_service
 from app.services.prompt_templates import (
     answer_composer_system_prompt,
     answer_composer_user_prompt,
@@ -88,6 +90,37 @@ class InputAnalysisResult(BaseModel):
     reason: str = ""
 
 
+class AgentGoalResolution(BaseModel):
+    """这轮对话在长期健康管理视角下对应的目标。"""
+
+    goal_type: str = "general_tracking"
+    title: str = "健康管理任务"
+    horizon: str = "current_turn"
+    reason: str = ""
+
+
+class AgentExecutionPlan(BaseModel):
+    """这轮任务的显式执行计划。"""
+
+    goal_type: str = "general_tracking"
+    intent: str = "collect_more_info"
+    primary_action: str = "clarify_user_need"
+    planned_steps: list[str] = Field(default_factory=list)
+    completion_signal: str = ""
+    replan_if: list[str] = Field(default_factory=list)
+    requires_follow_up: bool = False
+    missing_information: list[str] = Field(default_factory=list)
+
+
+class AgentReplanDecision(BaseModel):
+    """执行准备后是否需要调整计划。"""
+
+    should_replan: bool = False
+    updated_intent: str | None = None
+    reason: str = ""
+    next_action: str = "compose_answer"
+
+
 class ReportFollowUpPlan(BaseModel):
     """报告追问拆解计划。"""
 
@@ -117,7 +150,11 @@ class AgentEntryResult(BaseModel):
     """
 
     conversation_history: list[dict[str, str]] = Field(default_factory=list)
+    memory: dict[str, Any] = Field(default_factory=dict)
     analysis: InputAnalysisResult | None = None
+    goal: AgentGoalResolution | None = None
+    plan: AgentExecutionPlan | None = None
+    replan: AgentReplanDecision | None = None
     immediate_response: AgentResponse | None = None
     execution: AgentExecutionResult | None = None
 
@@ -151,70 +188,172 @@ class ReactAgentService:
         # 5. 否则执行完整 Agent 主链
         # 6. 落助手消息并返回
         chat_session = self._get_or_create_session(session, session_id, report_id, message)
+        runtime = agent_runtime_service.start_run(
+            session,
+            session_id=chat_session.id,
+            report_id=report_id,
+            message=message,
+            response_mode="sync",
+        )
+        self._append_runtime_trace(
+            session,
+            runtime,
+            phase="session",
+            step_name="session_resolved",
+            payload={"session_id": chat_session.id, "report_id": report_id},
+        )
         # 如果这是一个空白新会话的首轮提问，就把标题自动改成问题摘要，
         # 这样左侧会话列表不会永远显示“新对话”。
         session_service.auto_title_if_needed(session, chat_session.id, message)
-        self._store_message(session, chat_session.id, "user", message)
-        # 入口图先处理上下文加载、安全检查、报告状态判断和意图分流。
-        entry_result = self._run_entry_graph(session, chat_session.id, report_id, message)
-        if entry_result.immediate_response:
+        self._store_message(session, chat_session.id, "user", message, agent_run_id=runtime.run_id)
+        try:
+            # 入口图先处理上下文加载、安全检查、报告状态判断和意图分流。
+            self._append_runtime_trace(session, runtime, phase="entry", step_name="entry_graph_started")
+            entry_result = self._run_entry_graph(session, chat_session.id, report_id, message)
+            self._append_runtime_trace(
+                session,
+                runtime,
+                phase="entry",
+                step_name="entry_graph_completed",
+                payload={
+                    "intent": entry_result.analysis.intent if entry_result.analysis else None,
+                    "goal_type": entry_result.goal.goal_type if entry_result.goal else None,
+                    "primary_action": entry_result.plan.primary_action if entry_result.plan else None,
+                    "immediate_response": bool(entry_result.immediate_response),
+                    "prepared_execution": bool(entry_result.execution),
+                },
+            )
+            if entry_result.analysis:
+                self._attach_runtime_goal(
+                    session,
+                    runtime,
+                    message=message,
+                    report_id=report_id,
+                    intent=entry_result.analysis.intent,
+                )
+            if entry_result.immediate_response:
+                self._append_runtime_trace(
+                    session,
+                    runtime,
+                    phase="response",
+                    step_name="immediate_response_returned",
+                    payload={"intent": entry_result.immediate_response.intent},
+                )
+                self._store_message(
+                    session,
+                    chat_session.id,
+                    "assistant",
+                    entry_result.immediate_response.answer,
+                    entry_result.immediate_response.intent,
+                    "handoff" if entry_result.immediate_response.handoff_required else "safe",
+                    entry_result.immediate_response.citations,
+                    agent_run_id=runtime.run_id,
+                )
+                self._complete_runtime(
+                    session,
+                    runtime,
+                    response=entry_result.immediate_response,
+                    status="handoff" if entry_result.immediate_response.handoff_required else "completed",
+                )
+                return entry_result.immediate_response
+
+            cache_key = self._cache_key(chat_session.id, report_id, message)
+            cached_response = self._load_cached_response(session, cache_key, chat_session.id)
+            if cached_response:
+                agent_runtime_service.update_cache_status(session, runtime, "persistent")
+                self._append_runtime_trace(session, runtime, phase="cache", step_name="persistent_cache_hit")
+                self._attach_runtime_goal(
+                    session,
+                    runtime,
+                    message=message,
+                    report_id=report_id,
+                    intent=cached_response.intent,
+                )
+                self._store_message(
+                    session,
+                    chat_session.id,
+                    "assistant",
+                    cached_response.answer,
+                    cached_response.intent,
+                    cached_response.safety_level,
+                    cached_response.citations,
+                    agent_run_id=runtime.run_id,
+                )
+                self._complete_runtime(session, runtime, response=cached_response)
+                return cached_response
+            execution = self.answer_cache.get(cache_key)
+            if not isinstance(execution, AgentExecutionResult):
+                cache_service.delete_agent_response(session, cache_key)
+                execution = None
+            elif execution is not None:
+                agent_runtime_service.update_cache_status(session, runtime, "memory")
+            if execution and self._is_incomplete_answer(self._strip_duplicate_appendix(execution.answer)):
+                # 如果缓存里已经是一条半成品答案，宁可丢掉重算。
+                self.answer_cache.pop(cache_key, None)
+                execution = None
+
+            if not execution:
+                self._append_runtime_trace(session, runtime, phase="prepare", step_name="execution_preparing")
+                execution = entry_result.execution or self._prepare_fast_path(
+                    session,
+                    chat_session.id,
+                    report_id,
+                    message,
+                    conversation_history=entry_result.conversation_history,
+                    analysis=entry_result.analysis,
+                )
+                self._attach_runtime_goal(
+                    session,
+                    runtime,
+                    message=message,
+                    report_id=report_id,
+                    intent=execution.intent,
+                )
+                self._append_runtime_trace(
+                    session,
+                    runtime,
+                    phase="compose",
+                    step_name="compose_started",
+                    payload={"intent": execution.intent, "used_tools": execution.used_tools},
+                )
+                execution.answer = self._run_compose_graph(execution)
+                self._append_runtime_trace(session, runtime, phase="compose", step_name="compose_completed")
+                self.answer_cache[cache_key] = execution
+            else:
+                self._attach_runtime_goal(
+                    session,
+                    runtime,
+                    message=message,
+                    report_id=report_id,
+                    intent=execution.intent,
+                )
+                self._append_runtime_trace(session, runtime, phase="cache", step_name="memory_cache_hit")
+
+            response = self._build_agent_response(chat_session.id, execution)
+            self._save_cached_response(session, cache_key, report_id, message, response)
             self._store_message(
                 session,
                 chat_session.id,
                 "assistant",
-                entry_result.immediate_response.answer,
-                entry_result.immediate_response.intent,
-                "handoff" if entry_result.immediate_response.handoff_required else "safe",
-                entry_result.immediate_response.citations,
+                response.answer,
+                response.intent,
+                response.safety_level,
+                response.citations,
+                agent_run_id=runtime.run_id,
             )
-            return entry_result.immediate_response
-
-        cache_key = self._cache_key(chat_session.id, report_id, message)
-        cached_response = self._load_cached_response(session, cache_key, chat_session.id)
-        if cached_response:
-            self._store_message(
+            self._complete_runtime(session, runtime, response=response, execution=execution)
+            return response
+        except Exception as exc:
+            self._append_runtime_trace(
                 session,
-                chat_session.id,
-                "assistant",
-                cached_response.answer,
-                cached_response.intent,
-                cached_response.safety_level,
-                cached_response.citations,
+                runtime,
+                phase="runtime",
+                step_name="run_failed",
+                status="failed",
+                payload={"error": str(exc)},
             )
-            return cached_response
-        execution = self.answer_cache.get(cache_key)
-        if not isinstance(execution, AgentExecutionResult):
-            cache_service.delete_agent_response(session, cache_key)
-            execution = None
-        if execution and self._is_incomplete_answer(self._strip_duplicate_appendix(execution.answer)):
-            # 如果缓存里已经是一条半成品答案，宁可丢掉重算。
-            self.answer_cache.pop(cache_key, None)
-            execution = None
-
-        if not execution:
-            execution = entry_result.execution or self._prepare_fast_path(
-                session,
-                chat_session.id,
-                report_id,
-                message,
-                conversation_history=entry_result.conversation_history,
-                analysis=entry_result.analysis,
-            )
-            execution.answer = self._run_compose_graph(execution)
-            self.answer_cache[cache_key] = execution
-
-        response = self._build_agent_response(chat_session.id, execution)
-        self._save_cached_response(session, cache_key, report_id, message, response)
-        self._store_message(
-            session,
-            chat_session.id,
-            "assistant",
-            response.answer,
-            response.intent,
-            response.safety_level,
-            response.citations,
-        )
-        return response
+            agent_runtime_service.fail_run(session, runtime, str(exc))
+            raise
 
     def stream_respond(
         self,
@@ -229,86 +368,188 @@ class ReactAgentService:
         和 `respond()` 的主要区别在于它会把执行过程拆成多个 SSE 事件推给前端。
         """
         chat_session = self._get_or_create_session(session, session_id, report_id, message)
+        runtime = agent_runtime_service.start_run(
+            session,
+            session_id=chat_session.id,
+            report_id=report_id,
+            message=message,
+            response_mode="stream",
+        )
+        self._append_runtime_trace(
+            session,
+            runtime,
+            phase="session",
+            step_name="session_resolved",
+            payload={"session_id": chat_session.id, "report_id": report_id},
+        )
         # 流式接口与同步接口共享同一套自动命名规则，保证会话列表表现一致。
         session_service.auto_title_if_needed(session, chat_session.id, message)
-        self._store_message(session, chat_session.id, "user", message)
+        self._store_message(session, chat_session.id, "user", message, agent_run_id=runtime.run_id)
         yield {"event": "session", "data": {"session_id": chat_session.id}}
 
-        entry_stream = self._stream_entry_graph(session, chat_session.id, report_id, message)
-        while True:
-            try:
-                status_label = next(entry_stream)
-            except StopIteration as stop:
-                entry_result = stop.value
-                break
-            yield {"event": "status", "data": {"label": status_label}}
-        if entry_result.immediate_response:
-            for chunk in self._chunk_text(entry_result.immediate_response.answer):
-                yield {"event": "delta", "data": {"text": chunk}}
+        try:
+            self._append_runtime_trace(session, runtime, phase="entry", step_name="entry_graph_started")
+            entry_stream = self._stream_entry_graph(session, chat_session.id, report_id, message)
+            while True:
+                try:
+                    status_label = next(entry_stream)
+                except StopIteration as stop:
+                    entry_result = stop.value
+                    break
+                yield {"event": "status", "data": {"label": status_label}}
+            self._append_runtime_trace(
+                session,
+                runtime,
+                phase="entry",
+                step_name="entry_graph_completed",
+                payload={
+                    "intent": entry_result.analysis.intent if entry_result.analysis else None,
+                    "goal_type": entry_result.goal.goal_type if entry_result.goal else None,
+                    "primary_action": entry_result.plan.primary_action if entry_result.plan else None,
+                    "immediate_response": bool(entry_result.immediate_response),
+                    "prepared_execution": bool(entry_result.execution),
+                },
+            )
+            if entry_result.analysis:
+                self._attach_runtime_goal(
+                    session,
+                    runtime,
+                    message=message,
+                    report_id=report_id,
+                    intent=entry_result.analysis.intent,
+                )
+            if entry_result.immediate_response:
+                self._append_runtime_trace(
+                    session,
+                    runtime,
+                    phase="response",
+                    step_name="immediate_response_returned",
+                    payload={"intent": entry_result.immediate_response.intent},
+                )
+                for chunk in self._chunk_text(entry_result.immediate_response.answer):
+                    yield {"event": "delta", "data": {"text": chunk}}
+                self._store_message(
+                    session,
+                    chat_session.id,
+                    "assistant",
+                    entry_result.immediate_response.answer,
+                    entry_result.immediate_response.intent,
+                    "handoff" if entry_result.immediate_response.handoff_required else "safe",
+                    entry_result.immediate_response.citations,
+                    agent_run_id=runtime.run_id,
+                )
+                self._complete_runtime(
+                    session,
+                    runtime,
+                    response=entry_result.immediate_response,
+                    status="handoff" if entry_result.immediate_response.handoff_required else "completed",
+                )
+                yield {"event": "final", "data": entry_result.immediate_response.model_dump(mode="json")}
+                return
+
+            cache_key = self._cache_key(chat_session.id, report_id, message)
+            cached_response = self._load_cached_response(session, cache_key, chat_session.id)
+            if cached_response:
+                agent_runtime_service.update_cache_status(session, runtime, "persistent")
+                self._append_runtime_trace(session, runtime, phase="cache", step_name="persistent_cache_hit")
+                self._attach_runtime_goal(
+                    session,
+                    runtime,
+                    message=message,
+                    report_id=report_id,
+                    intent=cached_response.intent,
+                )
+                yield {"event": "status", "data": {"label": "命中缓存，正在返回历史结果"}}
+                self._store_message(
+                    session,
+                    chat_session.id,
+                    "assistant",
+                    cached_response.answer,
+                    cached_response.intent,
+                    cached_response.safety_level,
+                    cached_response.citations,
+                    agent_run_id=runtime.run_id,
+                )
+                self._complete_runtime(session, runtime, response=cached_response)
+                for chunk in self._chunk_text(cached_response.answer):
+                    yield {"event": "delta", "data": {"text": chunk}}
+                yield {"event": "final", "data": cached_response.model_dump(mode="json")}
+                return
+
+            cache_key = self._cache_key(chat_session.id, report_id, message)
+            memory_cached_execution = self.answer_cache.get(cache_key)
+            if not isinstance(memory_cached_execution, AgentExecutionResult):
+                memory_cached_execution = None
+            else:
+                agent_runtime_service.update_cache_status(session, runtime, "memory")
+            graph_prepared_execution = entry_result.execution
+            execution = graph_prepared_execution or memory_cached_execution or self._prepare_fast_path(
+                session,
+                chat_session.id,
+                report_id,
+                message,
+                conversation_history=entry_result.conversation_history,
+                analysis=entry_result.analysis,
+            )
+            self._attach_runtime_goal(
+                session,
+                runtime,
+                message=message,
+                report_id=report_id,
+                intent=execution.intent,
+            )
+            if graph_prepared_execution is None and memory_cached_execution is None:
+                self._append_runtime_trace(session, runtime, phase="prepare", step_name="execution_preparing")
+            elif memory_cached_execution is not None:
+                self._append_runtime_trace(session, runtime, phase="cache", step_name="memory_cache_hit")
+            else:
+                self._append_runtime_trace(session, runtime, phase="prepare", step_name="graph_execution_reused")
+            # 已经由 LangGraph 准备节点发过阶段状态的场景，这里不再重复补一轮工具状态。
+            if graph_prepared_execution is None or self._should_emit_tool_statuses_after_entry(execution):
+                for tool in execution.used_tools:
+                    yield {"event": "status", "data": {"label": self._tool_status_label(tool)}}
+            self._append_runtime_trace(
+                session,
+                runtime,
+                phase="compose",
+                step_name="compose_started",
+                payload={"intent": execution.intent, "used_tools": execution.used_tools},
+            )
+            compose_stream = self._stream_compose_graph(execution)
+            while True:
+                try:
+                    compose_event = next(compose_stream)
+                except StopIteration as stop:
+                    execution.answer = stop.value or ""
+                    break
+                yield compose_event
+            self._append_runtime_trace(session, runtime, phase="compose", step_name="compose_completed")
+            self.answer_cache[cache_key] = execution
+            response = self._build_agent_response(chat_session.id, execution)
+            self._save_cached_response(session, cache_key, report_id, message, response)
             self._store_message(
                 session,
                 chat_session.id,
                 "assistant",
-                entry_result.immediate_response.answer,
-                entry_result.immediate_response.intent,
-                "handoff" if entry_result.immediate_response.handoff_required else "safe",
-                entry_result.immediate_response.citations,
+                response.answer,
+                response.intent,
+                response.safety_level,
+                response.citations,
+                agent_run_id=runtime.run_id,
             )
-            yield {"event": "final", "data": entry_result.immediate_response.model_dump(mode="json")}
-            return
-
-        cache_key = self._cache_key(chat_session.id, report_id, message)
-        cached_response = self._load_cached_response(session, cache_key, chat_session.id)
-        if cached_response:
-            yield {"event": "status", "data": {"label": "命中缓存，正在返回历史结果"}}
-            self._store_message(
+            self._complete_runtime(session, runtime, response=response, execution=execution)
+            yield {"event": "final", "data": response.model_dump(mode="json")}
+        except Exception as exc:
+            self._append_runtime_trace(
                 session,
-                chat_session.id,
-                "assistant",
-                cached_response.answer,
-                cached_response.intent,
-                cached_response.safety_level,
-                cached_response.citations,
+                runtime,
+                phase="runtime",
+                step_name="run_failed",
+                status="failed",
+                payload={"error": str(exc)},
             )
-            for chunk in self._chunk_text(cached_response.answer):
-                yield {"event": "delta", "data": {"text": chunk}}
-            yield {"event": "final", "data": cached_response.model_dump(mode="json")}
-            return
-
-        graph_prepared_execution = entry_result.execution
-        execution = graph_prepared_execution or self._prepare_fast_path(
-            session,
-            chat_session.id,
-            report_id,
-            message,
-            conversation_history=entry_result.conversation_history,
-            analysis=entry_result.analysis,
-        )
-        # 已经由 LangGraph 准备节点发过阶段状态的场景，这里不再重复补一轮工具状态。
-        if graph_prepared_execution is None or self._should_emit_tool_statuses_after_entry(execution):
-            for tool in execution.used_tools:
-                yield {"event": "status", "data": {"label": self._tool_status_label(tool)}}
-        compose_stream = self._stream_compose_graph(execution)
-        while True:
-            try:
-                compose_event = next(compose_stream)
-            except StopIteration as stop:
-                execution.answer = stop.value or ""
-                break
-            yield compose_event
-        self.answer_cache[cache_key] = execution
-        response = self._build_agent_response(chat_session.id, execution)
-        self._save_cached_response(session, cache_key, report_id, message, response)
-        self._store_message(
-            session,
-            chat_session.id,
-            "assistant",
-            response.answer,
-            response.intent,
-            response.safety_level,
-            response.citations,
-        )
-        yield {"event": "final", "data": response.model_dump(mode="json")}
+            agent_runtime_service.fail_run(session, runtime, str(exc))
+            raise
 
     def _run_entry_graph(
         self,
@@ -334,7 +575,11 @@ class ReactAgentService:
             )
             return AgentEntryResult(
                 conversation_history=state.get("conversation_history") or conversation_history,
+                memory=state.get("memory_data") or {},
                 analysis=state.get("analysis"),
+                goal=AgentGoalResolution.model_validate(state["goal_data"]) if state.get("goal_data") else None,
+                plan=AgentExecutionPlan.model_validate(state["plan_data"]) if state.get("plan_data") else None,
+                replan=AgentReplanDecision.model_validate(state["replan_data"]) if state.get("replan_data") else None,
                 immediate_response=state.get("immediate_response"),
                 execution=(
                     AgentExecutionResult.model_validate(state["execution_data"])
@@ -347,9 +592,29 @@ class ReactAgentService:
             immediate = self._handle_immediate_response(session, session_id, report_id, message)
             if immediate:
                 return AgentEntryResult(conversation_history=conversation_history, immediate_response=immediate)
+            fallback_memory = self._load_agent_memory(session=session, session_id=session_id, report_id=report_id)
+            fallback_analysis = self._analyze_input(message, report_id is not None, conversation_history)
+            fallback_goal = self._resolve_goal(
+                message=message,
+                analysis=fallback_analysis,
+                report_id=report_id,
+                conversation_history=conversation_history,
+                memory_data=fallback_memory,
+            )
+            fallback_plan = self._build_execution_plan(
+                message=message,
+                analysis=fallback_analysis,
+                goal_data=fallback_goal.model_dump(mode="json"),
+                report_id=report_id,
+                conversation_history=conversation_history,
+                memory_data=fallback_memory,
+            )
             return AgentEntryResult(
                 conversation_history=conversation_history,
-                analysis=self._analyze_input(message, report_id is not None, conversation_history),
+                memory=fallback_memory,
+                analysis=fallback_analysis,
+                goal=fallback_goal,
+                plan=fallback_plan,
                 execution=None,
             )
 
@@ -414,7 +679,11 @@ class ReactAgentService:
                         yield status_label
             return AgentEntryResult(
                 conversation_history=accumulated_state.get("conversation_history") or conversation_history,
+                memory=accumulated_state.get("memory_data") or {},
                 analysis=accumulated_state.get("analysis"),
+                goal=AgentGoalResolution.model_validate(accumulated_state["goal_data"]) if accumulated_state.get("goal_data") else None,
+                plan=AgentExecutionPlan.model_validate(accumulated_state["plan_data"]) if accumulated_state.get("plan_data") else None,
+                replan=AgentReplanDecision.model_validate(accumulated_state["replan_data"]) if accumulated_state.get("replan_data") else None,
                 immediate_response=accumulated_state.get("immediate_response"),
                 execution=(
                     AgentExecutionResult.model_validate(accumulated_state["execution_data"])
@@ -472,13 +741,17 @@ class ReactAgentService:
         """把入口图节点名转换成前端可读文案。"""
         return {
             "load_context": "读取上下文中",
+            "load_memory": "加载长期记忆",
             "safety_gate": "进行安全检查",
             "report_gate": "核对报告状态",
             "route_intent": "分析问题中",
+            "resolve_goal": "识别健康管理目标",
+            "plan_execution": "规划执行步骤",
             "prepare_collect_more_info": "整理追问信息",
             "prepare_report_follow_up": "准备报告解读",
             "prepare_term_explanation": "整理术语解释",
             "prepare_retrieval": "检索相关知识中",
+            "replan_execution": "校验并调整计划",
         }.get(node_name)
 
     def _graph_custom_status_label(self, payload: Any) -> str | None:
@@ -547,6 +820,251 @@ class ReactAgentService:
             safety_level="safe",
             handoff_required=False,
         )
+
+    def _load_agent_memory(self, *, session: Session, session_id: str, report_id: str | None) -> dict[str, Any]:
+        """读取当前会话的长期记忆层。"""
+
+        return agent_memory_service.load_memories(session, session_id, report_id)
+
+    def _resolve_goal(
+        self,
+        *,
+        message: str,
+        analysis: InputAnalysisResult,
+        report_id: str | None,
+        conversation_history: list[dict[str, str]],
+        memory_data: dict[str, Any],
+    ) -> AgentGoalResolution:
+        """把单轮意图映射成长期健康管理视角下的目标。"""
+
+        report_insight = memory_data.get("report_insight", {}) if isinstance(memory_data, dict) else {}
+        session_memory = memory_data.get("session_memory", {}) if isinstance(memory_data, dict) else {}
+        if analysis.intent == "report_follow_up":
+            return AgentGoalResolution(
+                goal_type="report_monitoring",
+                title="当前报告持续跟踪",
+                horizon="multi_turn",
+                reason="用户围绕体检报告、异常指标和后续跟踪发问。"
+                + (f" 近期报告洞察：{report_insight.get('monitoring_summary')}" if report_insight.get("monitoring_summary") else ""),
+            )
+        if analysis.intent == "term_explanation":
+            return AgentGoalResolution(
+                goal_type="knowledge_learning",
+                title="健康知识理解",
+                horizon="session",
+                reason="用户主要想理解术语、疾病概念或指标背景。",
+            )
+        if analysis.intent == "symptom_rag_advice":
+            return AgentGoalResolution(
+                goal_type="health_management_guidance",
+                title="健康管理方向建议",
+                horizon="session",
+                reason="用户需要非急症方向性的健康建议和下一步行动。",
+            )
+        if analysis.intent == "safety_handoff":
+            return AgentGoalResolution(
+                goal_type="safety_escalation",
+                title="高风险安全交接",
+                horizon="immediate",
+                reason="当前问题涉及高风险医疗判断，需要优先降级和线下处理。",
+            )
+        if report_id or any("报告" in item.get("content", "") for item in conversation_history if isinstance(item, dict)):
+            return AgentGoalResolution(
+                goal_type="report_monitoring",
+                title="当前报告持续跟踪",
+                horizon="multi_turn",
+                reason="当前会话仍然处于报告相关的长期跟踪上下文。"
+                + (f" 会话摘要：{session_memory.get('summary_text')}" if session_memory.get("summary_text") else ""),
+            )
+        return AgentGoalResolution(
+            goal_type="clarification",
+            title="需求澄清与下一步判断",
+            horizon="current_turn",
+            reason="当前信息不足，需要先明确用户真正想完成的任务。"
+            + (f" 会话摘要：{session_memory.get('summary_text')}" if session_memory.get("summary_text") else ""),
+        )
+
+    def _build_execution_plan(
+        self,
+        *,
+        message: str,
+        analysis: InputAnalysisResult,
+        goal_data: dict[str, Any],
+        report_id: str | None,
+        conversation_history: list[dict[str, str]],
+        memory_data: dict[str, Any],
+    ) -> AgentExecutionPlan:
+        """为当前目标生成显式执行计划。"""
+
+        goal = AgentGoalResolution.model_validate(goal_data or {})
+        report_insight = memory_data.get("report_insight", {}) if isinstance(memory_data, dict) else {}
+        session_memory = memory_data.get("session_memory", {}) if isinstance(memory_data, dict) else {}
+        if analysis.intent == "report_follow_up":
+            return AgentExecutionPlan(
+                goal_type=goal.goal_type,
+                intent=analysis.intent,
+                primary_action="analyze_report_and_recommend_next_steps",
+                planned_steps=[
+                    "读取长期报告洞察，确认已知重点异常项",
+                    "确认当前会话绑定的报告和上下文",
+                    "筛选最值得优先解释的异常指标",
+                    "解释单项指标并整合成综合结论",
+                    "给出后续复查和长期跟踪建议",
+                ],
+                completion_signal="能够给出重点指标、综合解读和后续建议。"
+                + (f" 当前重点异常：{'、'.join(report_insight.get('abnormal_item_names', [])[:3])}" if report_insight.get("abnormal_item_names") else ""),
+                replan_if=["报告里没有足够的结构化指标", "用户其实在问更具体的某一个指标"],
+                requires_follow_up=False,
+            )
+        if analysis.intent == "term_explanation":
+            return AgentExecutionPlan(
+                goal_type=goal.goal_type,
+                intent=analysis.intent,
+                primary_action="explain_term_with_authoritative_context",
+                planned_steps=[
+                    "读取会话摘要，避免重复解释同一概念",
+                    "规范化术语或问题表达",
+                    "检索本地医学知识",
+                    "必要时补充 WHO ICD-11 信息",
+                    "生成通俗但保守的解释",
+                ],
+                completion_signal="能够说明概念、本质特征和何时需要进一步就医。",
+                replan_if=["本地知识为空", "术语过于模糊，需要用户补充范围"],
+                requires_follow_up=False,
+            )
+        if analysis.intent == "symptom_rag_advice":
+            return AgentExecutionPlan(
+                goal_type=goal.goal_type,
+                intent=analysis.intent,
+                primary_action="retrieve_context_and_offer_guidance",
+                planned_steps=[
+                    "抽取用户真正关心的症状或方向",
+                    "检索本地知识或药物相关资料",
+                    "整理非诊断性的方向建议",
+                    "明确需要补充的信息或就医提醒",
+                ],
+                completion_signal="能够给出方向建议，并说明信息边界。",
+                replan_if=["症状描述过少", "检索结果不足以支持回答"],
+                requires_follow_up=False,
+            )
+        missing_information = ["最关注的问题", "持续时间或严重程度"] if not report_id else ["最关注的指标", "是否有近期不适"]
+        if session_memory.get("focus_points"):
+            missing_information = [str(item) for item in missing_information] + ["是否延续之前关注的问题"]
+        return AgentExecutionPlan(
+            goal_type=goal.goal_type,
+            intent="collect_more_info",
+            primary_action="ask_for_clarifying_information",
+            planned_steps=[
+                "明确用户当前真正想解决的任务",
+                "收集完成该任务必须的 1 到 3 条信息",
+                "在补齐信息后重新进入回答主链",
+            ],
+            completion_signal="拿到足够信息后可以重新规划并执行。",
+            replan_if=["用户补充了更具体的问题", "会话里出现新的报告上下文"],
+            requires_follow_up=True,
+            missing_information=missing_information,
+        )
+
+    def _replan_after_execution(
+        self,
+        *,
+        analysis: InputAnalysisResult,
+        goal_data: dict[str, Any],
+        plan_data: dict[str, Any],
+        execution_data: dict[str, Any],
+        conversation_history: list[dict[str, str]],
+        message: str,
+        memory_data: dict[str, Any],
+    ) -> AgentReplanDecision:
+        """根据工具准备结果判断是否需要改走追问路径。"""
+
+        del goal_data, conversation_history, message, memory_data  # 当前版本只依赖分析、计划和执行结果。
+        plan = AgentExecutionPlan.model_validate(plan_data or {})
+        execution = AgentExecutionResult.model_validate(execution_data or {})
+        if analysis.intent == "collect_more_info":
+            return AgentReplanDecision(
+                should_replan=True,
+                updated_intent="collect_more_info",
+                reason="当前路径本身就是补充信息场景，需要把执行计划收敛成追问。",
+                next_action="ask_follow_up",
+            )
+        if execution.intent == "report_follow_up":
+            lab_result = next((item.get("result", {}) for item in execution.tool_outputs if item.get("tool") == "interpret_lab"), {})
+            items = lab_result.get("items", []) if isinstance(lab_result, dict) else []
+            if not items:
+                return AgentReplanDecision(
+                    should_replan=True,
+                    updated_intent="collect_more_info",
+                    reason="报告解读链没有拿到足够清晰的指标解释结果，先追问用户最关注的指标更稳妥。",
+                    next_action="ask_follow_up",
+                )
+        if execution.intent == "symptom_rag_advice":
+            has_docs = False
+            for item in execution.tool_outputs:
+                result = item.get("result", {})
+                if isinstance(result, dict) and result.get("docs"):
+                    has_docs = True
+                    break
+            if not has_docs and plan.requires_follow_up is False:
+                return AgentReplanDecision(
+                    should_replan=True,
+                    updated_intent="collect_more_info",
+                    reason="当前检索素材不足，先让用户补充更具体的症状、检查项或关注点会更稳。",
+                    next_action="ask_follow_up",
+                )
+        return AgentReplanDecision(
+            should_replan=False,
+            updated_intent=execution.intent,
+            reason="当前准备结果足以进入回答生成。",
+            next_action="compose_answer",
+        )
+
+    def _apply_replan_to_execution(
+        self,
+        *,
+        execution_data: dict[str, Any],
+        replan_data: dict[str, Any],
+        goal_data: dict[str, Any],
+        plan_data: dict[str, Any],
+        analysis: InputAnalysisResult,
+        conversation_history: list[dict[str, str]],
+        message: str,
+        memory_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """把重规划结果回写到 execution_data。"""
+
+        execution = AgentExecutionResult.model_validate(execution_data or {})
+        replan = AgentReplanDecision.model_validate(replan_data or {})
+        debug_payload = dict(execution.debug or {})
+        debug_payload["memory"] = memory_data or {}
+        debug_payload["goal"] = goal_data or {}
+        debug_payload["plan"] = self._merge_plan_debug(debug_payload.get("plan"), plan_data)
+        debug_payload["replan"] = replan.model_dump(mode="json")
+
+        if replan.should_replan and replan.updated_intent == "collect_more_info":
+            fallback_execution = self._build_collect_more_info_execution(
+                conversation_history=conversation_history,
+                message=message,
+                analysis=analysis.model_copy(update={"intent": "collect_more_info"}),
+            )
+            fallback_debug = dict(fallback_execution.debug or {})
+            fallback_debug["memory"] = memory_data or {}
+            fallback_debug["goal"] = goal_data or {}
+            fallback_debug["plan"] = self._merge_plan_debug(fallback_debug.get("plan"), plan_data)
+            fallback_debug["replan"] = replan.model_dump(mode="json")
+            fallback_execution.debug = fallback_debug
+            return fallback_execution.model_dump(mode="json")
+
+        execution.debug = debug_payload
+        return execution.model_dump(mode="json")
+
+    def _merge_plan_debug(self, existing_plan: Any, planner_data: dict[str, Any]) -> dict[str, Any]:
+        """把高层任务计划和已有的细分计划合并到调试信息里。"""
+
+        merged: dict[str, Any] = {"task_plan": planner_data or {}}
+        if isinstance(existing_plan, dict) and existing_plan:
+            merged["execution_plan"] = existing_plan
+        return merged
 
     def _handle_immediate_response(
         self,
@@ -678,9 +1196,12 @@ class ReactAgentService:
         conversation_history: list[dict[str, str]],
         message: str,
         analysis: InputAnalysisResult,
+        memory_data: dict[str, Any] | None = None,
+        planner_data: dict[str, Any] | None = None,
         status_emitter: Callable[[str], None] | None = None,
     ) -> AgentExecutionResult:
         """组装报告追问场景的结构化执行结果。"""
+        del planner_data
         if not report_id:
             return self._build_collect_more_info_execution(conversation_history, message, analysis)
         if status_emitter:
@@ -723,6 +1244,7 @@ class ReactAgentService:
             use_max=analysis.use_max,
             debug={
                 "analysis": analysis.model_dump(mode="json"),
+                "memory": memory_data or {},
                 "plan": plan.model_dump(mode="json"),
                 "synthesis": synthesis.model_dump(mode="json"),
             },
@@ -734,9 +1256,12 @@ class ReactAgentService:
         conversation_history: list[dict[str, str]],
         message: str,
         analysis: InputAnalysisResult,
+        memory_data: dict[str, Any] | None = None,
+        planner_data: dict[str, Any] | None = None,
         status_emitter: Callable[[str], None] | None = None,
     ) -> AgentExecutionResult:
         """组装普通知识检索场景的结构化执行结果。"""
+        del planner_data
         effective_query = analysis.rewritten_query or message
         tool_name = "query_drug" if any(token in effective_query for token in DRUG_KEYWORDS) else "retrieve_knowledge"
         if status_emitter and analysis.use_local_knowledge:
@@ -760,7 +1285,7 @@ class ReactAgentService:
             conversation_history=conversation_history,
             message=message,
             use_max=analysis.use_max,
-            debug={"analysis": analysis.model_dump(mode="json")},
+            debug={"analysis": analysis.model_dump(mode="json"), "memory": memory_data or {}},
         )
 
     def _plan_report_follow_up(
@@ -902,9 +1427,12 @@ class ReactAgentService:
         conversation_history: list[dict[str, str]],
         message: str,
         analysis: InputAnalysisResult,
+        memory_data: dict[str, Any] | None = None,
+        planner_data: dict[str, Any] | None = None,
         status_emitter: Callable[[str], None] | None = None,
     ) -> AgentExecutionResult:
         """处理医学名词解释。优先本地知识，其次 WHO，最后再由模型润色。"""
+        del planner_data
         # 术语解释优先用“改写后或标准化后的术语”去查资料，而不是死磕用户原话。
         effective_query = analysis.rewritten_query or analysis.normalized_term or self._strip_question_tail(message)
         if status_emitter and analysis.use_local_knowledge:
@@ -941,7 +1469,7 @@ class ReactAgentService:
             conversation_history=conversation_history,
             message=message,
             use_max=analysis.use_max,
-            debug={"analysis": analysis.model_dump(mode="json")},
+            debug={"analysis": analysis.model_dump(mode="json"), "memory": memory_data or {}},
         )
 
     def _lookup_who_with_candidates(self, message: str, docs: list[Any]) -> dict[str, Any]:
@@ -1441,6 +1969,96 @@ class ReactAgentService:
             response=response,
         )
 
+    def _append_runtime_trace(
+        self,
+        session: Session,
+        runtime: AgentRuntimeContext | None,
+        *,
+        phase: str,
+        step_name: str,
+        status: str = "completed",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """向当前 Agent 运行追加一条轨迹事件。"""
+
+        if runtime is None:
+            return
+        agent_runtime_service.append_trace(
+            session,
+            runtime,
+            phase=phase,
+            step_name=step_name,
+            status=status,
+            payload=payload,
+        )
+
+    def _attach_runtime_goal(
+        self,
+        session: Session,
+        runtime: AgentRuntimeContext | None,
+        *,
+        message: str,
+        report_id: str | None,
+        intent: str | None,
+    ) -> None:
+        """根据本轮 intent 把运行挂到一个长期目标上。"""
+
+        if runtime is None or not intent:
+            return
+        goal = agent_runtime_service.attach_goal(
+            session,
+            runtime,
+            intent=intent,
+            message=message,
+            report_id=report_id,
+        )
+        if goal is None:
+            return
+        self._append_runtime_trace(
+            session,
+            runtime,
+            phase="goal",
+            step_name="goal_attached",
+            payload={
+                "goal_id": goal.id,
+                "goal_type": goal.goal_type,
+                "title": goal.title,
+            },
+        )
+
+    def _complete_runtime(
+        self,
+        session: Session,
+        runtime: AgentRuntimeContext | None,
+        *,
+        response: AgentResponse,
+        execution: AgentExecutionResult | None = None,
+        status: str = "completed",
+    ) -> None:
+        """把当前运行标记为完成，并把运行摘要挂到调试信息上。"""
+
+        if runtime is None:
+            return
+        agent_runtime_service.complete_run(
+            session,
+            runtime,
+            intent=response.intent,
+            answer=response.answer,
+            used_tools=execution.used_tools if execution else response.used_tools,
+            debug=(execution.debug if execution else (response.debug.model_dump(mode="json") if response.debug else {})),
+            handoff_required=response.handoff_required,
+            status=status,
+        )
+        runtime_debug = agent_runtime_service.build_debug_attachment(session, runtime)
+        merged_debug = response.debug.model_dump(mode="json") if response.debug else {}
+        merged_debug.update(runtime_debug)
+        response.debug = AgentDebug.model_validate(merged_debug)
+        agent_memory_service.refresh_session_memory(
+            session,
+            runtime.session_id,
+            latest_run_id=runtime.run_id,
+        )
+
     def _cache_key(self, session_id: str, report_id: str | None, message: str) -> str:
         """生成回答缓存键。"""
         normalized = re.sub(r"\s+", " ", message.strip())
@@ -1523,11 +2141,13 @@ class ReactAgentService:
         intent: str | None = None,
         safety_level: str = "safe",
         citations: list[Citation] | None = None,
+        agent_run_id: str | None = None,
     ) -> None:
         """把一条用户或助手消息持久化到数据库。"""
         # 这里不只是存纯文本，还会把意图、安全等级和 citations 一起落库。
         message = ChatMessage(
             session_id=session_id,
+            agent_run_id=agent_run_id,
             role=role,
             content=content,
             intent=intent,

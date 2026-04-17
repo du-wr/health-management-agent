@@ -13,6 +13,7 @@ from app.core.database import engine
 from app.core.schemas import LabItem as LabItemSchema
 from app.core.schemas import ReportParseResult
 from app.models.entities import LabItem, Report
+from app.services.agent_memory_service import agent_memory_service
 from app.services.llm import llm_service
 from app.services.prompt_templates import lab_extraction_system_prompt, report_ocr_prompt
 from app.services.report_progress_service import report_progress_service
@@ -110,6 +111,7 @@ class ReportService:
             report.parse_warnings_json = json.dumps(warnings, ensure_ascii=False)
             session.add(report)
             session.commit()
+            agent_memory_service.refresh_report_insight(session, report.id)
             report_progress_service.mark_complete(report.id, parse_status=report.parse_status)
         except Exception as exc:
             report.parse_status = "error"

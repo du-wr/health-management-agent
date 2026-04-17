@@ -55,6 +55,86 @@ class AgentAnswerCache(SQLModel, table=True):
     expires_at: datetime = Field(index=True)
 
 
+class AgentGoal(SQLModel, table=True):
+    """会话级长期目标。
+
+    这里承载的是“这段会话当前主要在做什么”，
+    例如术语学习、报告解读、长期健康跟踪等。
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    session_id: str = Field(index=True)
+    report_id: str | None = Field(default=None, index=True)
+    goal_type: str = Field(index=True)
+    title: str
+    status: str = Field(default="active", index=True)
+    source_intent: str | None = Field(default=None, index=True)
+    latest_user_message: str = Field(default="", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default=""))
+    summary_json: str = Field(default="{}", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default="{}"))
+    last_run_id: str | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class AgentTaskRun(SQLModel, table=True):
+    """一次完整的 Agent 运行记录。"""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    session_id: str = Field(index=True)
+    goal_id: str | None = Field(default=None, index=True)
+    report_id: str | None = Field(default=None, index=True)
+    user_message: str = Field(sa_column=Column(LONG_TEXT_TYPE, nullable=False))
+    normalized_message: str = Field(default="", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default=""))
+    status: str = Field(default="running", index=True)
+    intent: str | None = Field(default=None, index=True)
+    response_mode: str = Field(default="stream", index=True)
+    cache_status: str = Field(default="miss", index=True)
+    handoff_required: bool = False
+    answer_excerpt: str = Field(default="", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default=""))
+    used_tools_json: str = Field(default="[]", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default="[]"))
+    debug_json: str = Field(default="{}", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default="{}"))
+    error_message: str | None = Field(default=None, sa_column=Column(LONG_TEXT_TYPE, nullable=True))
+    started_at: datetime = Field(default_factory=utc_now, index=True)
+    finished_at: datetime | None = Field(default=None, index=True)
+
+
+class AgentTraceEvent(SQLModel, table=True):
+    """一次 Agent 运行中的节点级轨迹事件。"""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    run_id: str = Field(index=True)
+    sequence_no: int = Field(index=True)
+    phase: str = Field(index=True)
+    step_name: str = Field(index=True)
+    status: str = Field(default="completed", index=True)
+    payload_json: str = Field(default="{}", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default="{}"))
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class SessionMemory(SQLModel, table=True):
+    """会话级长期记忆摘要。"""
+
+    session_id: str = Field(primary_key=True)
+    report_id: str | None = Field(default=None, index=True)
+    latest_run_id: str | None = Field(default=None, index=True)
+    summary_text: str = Field(default="", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default=""))
+    focus_points_json: str = Field(default="[]", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default="[]"))
+    latest_intent: str | None = Field(default=None, index=True)
+    message_count: int = 0
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class ReportInsight(SQLModel, table=True):
+    """报告级长期洞察。"""
+
+    report_id: str = Field(primary_key=True)
+    parse_status: str = Field(default="uploaded", index=True)
+    abnormal_item_names_json: str = Field(default="[]", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default="[]"))
+    key_findings_json: str = Field(default="[]", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default="[]"))
+    monitoring_summary: str = Field(default="", sa_column=Column(LONG_TEXT_TYPE, nullable=False, default=""))
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
 class LabItem(SQLModel, table=True):
     """报告里的单个结构化指标。"""
 
@@ -86,6 +166,7 @@ class ChatMessage(SQLModel, table=True):
 
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     session_id: str = Field(index=True)
+    agent_run_id: str | None = Field(default=None, index=True)
     role: str
     content: str = Field(sa_column=Column(LONG_TEXT_TYPE, nullable=False))
     intent: str | None = None

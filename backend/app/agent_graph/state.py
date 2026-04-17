@@ -25,7 +25,11 @@ class AgentEntryGraphState(TypedDict, total=False):
     report_id: str | None
     message: str
     conversation_history: list[dict[str, str]]
+    memory_data: dict[str, Any] | None
     analysis: Any
+    goal_data: dict[str, Any] | None
+    plan_data: dict[str, Any] | None
+    replan_data: dict[str, Any] | None
     immediate_response: AgentResponse | None
     execution_data: dict[str, Any] | None
     answer_text: str | None

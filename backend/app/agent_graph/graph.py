@@ -28,16 +28,21 @@ def build_entry_graph(service: Any):
     builder = StateGraph(AgentEntryGraphState)
 
     builder.add_node("load_context", lambda state: _load_context_node(service, state))
+    builder.add_node("load_memory", lambda state: _load_memory_node(service, state))
     builder.add_node("safety_gate", lambda state: _safety_gate_node(service, state))
     builder.add_node("report_gate", lambda state: _report_gate_node(service, state))
     builder.add_node("route_intent", lambda state: _route_intent_node(service, state))
+    builder.add_node("resolve_goal", lambda state: _resolve_goal_node(service, state))
+    builder.add_node("plan_execution", lambda state: _plan_execution_node(service, state))
     builder.add_node("prepare_collect_more_info", lambda state: _prepare_collect_more_info_node(service, state))
     builder.add_node("prepare_report_follow_up", lambda state: _prepare_report_follow_up_node(service, state))
     builder.add_node("prepare_term_explanation", lambda state: _prepare_term_explanation_node(service, state))
     builder.add_node("prepare_retrieval", lambda state: _prepare_retrieval_node(service, state))
+    builder.add_node("replan_execution", lambda state: _replan_execution_node(service, state))
 
     builder.add_edge(START, "load_context")
-    builder.add_edge("load_context", "safety_gate")
+    builder.add_edge("load_context", "load_memory")
+    builder.add_edge("load_memory", "safety_gate")
     builder.add_conditional_edges(
         "safety_gate",
         _after_immediate_gate,
@@ -48,8 +53,10 @@ def build_entry_graph(service: Any):
         _after_immediate_gate,
         {"stop": END, "continue": "route_intent"},
     )
+    builder.add_edge("route_intent", "resolve_goal")
+    builder.add_edge("resolve_goal", "plan_execution")
     builder.add_conditional_edges(
-        "route_intent",
+        "plan_execution",
         _route_to_prepare_node,
         {
             "prepare_collect_more_info": "prepare_collect_more_info",
@@ -58,10 +65,11 @@ def build_entry_graph(service: Any):
             "prepare_retrieval": "prepare_retrieval",
         },
     )
-    builder.add_edge("prepare_collect_more_info", END)
-    builder.add_edge("prepare_report_follow_up", END)
-    builder.add_edge("prepare_term_explanation", END)
-    builder.add_edge("prepare_retrieval", END)
+    builder.add_edge("prepare_collect_more_info", "replan_execution")
+    builder.add_edge("prepare_report_follow_up", "replan_execution")
+    builder.add_edge("prepare_term_explanation", "replan_execution")
+    builder.add_edge("prepare_retrieval", "replan_execution")
+    builder.add_edge("replan_execution", END)
 
     return builder.compile()
 
@@ -80,6 +88,17 @@ def _load_context_node(service: Any, state: AgentEntryGraphState) -> AgentEntryG
     session = state["session"]
     chat_session_id = state["chat_session_id"]
     return {"conversation_history": service._recent_conversation_context(session, chat_session_id)}
+
+
+def _load_memory_node(service: Any, state: AgentEntryGraphState) -> AgentEntryGraphState:
+    """加载会话级摘要记忆和报告级长期洞察。"""
+
+    memory_data = service._load_agent_memory(
+        session=state["session"],
+        session_id=state["chat_session_id"],
+        report_id=state.get("report_id"),
+    )
+    return {"memory_data": memory_data}
 
 
 def _compose_answer_node(service: Any, state: AgentComposeGraphState) -> AgentComposeGraphState:
@@ -154,6 +173,33 @@ def _route_intent_node(service: Any, state: AgentEntryGraphState) -> AgentEntryG
     return {"analysis": analysis}
 
 
+def _resolve_goal_node(service: Any, state: AgentEntryGraphState) -> AgentEntryGraphState:
+    """把单轮问题映射成长期健康管理目标。"""
+
+    goal = service._resolve_goal(
+        message=state["message"],
+        analysis=state["analysis"],
+        report_id=state.get("report_id"),
+        conversation_history=state.get("conversation_history", []),
+        memory_data=state.get("memory_data") or {},
+    )
+    return {"goal_data": goal.model_dump(mode="json")}
+
+
+def _plan_execution_node(service: Any, state: AgentEntryGraphState) -> AgentEntryGraphState:
+    """为当前目标生成显式执行计划。"""
+
+    plan = service._build_execution_plan(
+        message=state["message"],
+        analysis=state["analysis"],
+        goal_data=state.get("goal_data") or {},
+        report_id=state.get("report_id"),
+        conversation_history=state.get("conversation_history", []),
+        memory_data=state.get("memory_data") or {},
+    )
+    return {"plan_data": plan.model_dump(mode="json")}
+
+
 def _prepare_collect_more_info_node(service: Any, state: AgentEntryGraphState) -> AgentEntryGraphState:
     """准备信息不足场景的结构化执行结果。"""
     execution = service._build_collect_more_info_execution(
@@ -172,6 +218,8 @@ def _prepare_report_follow_up_node(service: Any, state: AgentEntryGraphState) ->
         conversation_history=state.get("conversation_history", []),
         message=state["message"],
         analysis=state["analysis"],
+        memory_data=state.get("memory_data") or {},
+        planner_data=state.get("plan_data") or {},
         status_emitter=_graph_status_emitter(),
     )
     return {"execution_data": execution.model_dump(mode="json")}
@@ -184,6 +232,8 @@ def _prepare_term_explanation_node(service: Any, state: AgentEntryGraphState) ->
         conversation_history=state.get("conversation_history", []),
         message=state["message"],
         analysis=state["analysis"],
+        memory_data=state.get("memory_data") or {},
+        planner_data=state.get("plan_data") or {},
         status_emitter=_graph_status_emitter(),
     )
     return {"execution_data": execution.model_dump(mode="json")}
@@ -196,9 +246,40 @@ def _prepare_retrieval_node(service: Any, state: AgentEntryGraphState) -> AgentE
         conversation_history=state.get("conversation_history", []),
         message=state["message"],
         analysis=state["analysis"],
+        memory_data=state.get("memory_data") or {},
+        planner_data=state.get("plan_data") or {},
         status_emitter=_graph_status_emitter(),
     )
     return {"execution_data": execution.model_dump(mode="json")}
+
+
+def _replan_execution_node(service: Any, state: AgentEntryGraphState) -> AgentEntryGraphState:
+    """根据准备好的工具结果判断是否需要重规划。"""
+
+    execution_data = state.get("execution_data") or {}
+    replan = service._replan_after_execution(
+        analysis=state["analysis"],
+        goal_data=state.get("goal_data") or {},
+        plan_data=state.get("plan_data") or {},
+        execution_data=execution_data,
+        conversation_history=state.get("conversation_history", []),
+        message=state["message"],
+        memory_data=state.get("memory_data") or {},
+    )
+    updated_execution = service._apply_replan_to_execution(
+        execution_data=execution_data,
+        replan_data=replan.model_dump(mode="json"),
+        goal_data=state.get("goal_data") or {},
+        plan_data=state.get("plan_data") or {},
+        analysis=state["analysis"],
+        conversation_history=state.get("conversation_history", []),
+        message=state["message"],
+        memory_data=state.get("memory_data") or {},
+    )
+    return {
+        "replan_data": replan.model_dump(mode="json"),
+        "execution_data": updated_execution,
+    }
 
 
 def _after_immediate_gate(state: AgentEntryGraphState) -> str:
@@ -208,8 +289,11 @@ def _after_immediate_gate(state: AgentEntryGraphState) -> str:
 
 def _route_to_prepare_node(state: AgentEntryGraphState) -> str:
     """根据 intent 选择进入哪个准备节点。"""
-    analysis = state.get("analysis")
-    intent = getattr(analysis, "intent", None)
+    plan_data = state.get("plan_data") or {}
+    intent = plan_data.get("intent")
+    if not intent:
+        analysis = state.get("analysis")
+        intent = getattr(analysis, "intent", None)
     if intent == "collect_more_info":
         return "prepare_collect_more_info"
     if intent == "report_follow_up":

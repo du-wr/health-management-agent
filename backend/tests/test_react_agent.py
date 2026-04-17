@@ -56,6 +56,11 @@ def test_entry_graph_returns_analysis_for_normal_query(monkeypatch) -> None:
         assert entry.analysis is not None
         assert entry.analysis.intent == "term_explanation"
         assert entry.analysis.reason == "graph_route"
+        assert entry.memory is not None
+        assert entry.goal is not None
+        assert entry.goal.goal_type == "knowledge_learning"
+        assert entry.plan is not None
+        assert entry.plan.primary_action == "explain_term_with_authoritative_context"
         assert entry.execution is not None
         assert entry.execution.intent == "term_explanation"
     finally:
@@ -103,13 +108,63 @@ def test_stream_entry_graph_emits_status_and_returns_execution(monkeypatch) -> N
                     break
 
         assert "读取上下文中" in labels
+        assert "加载长期记忆" in labels
         assert "进行安全检查" in labels
         assert "分析问题中" in labels
+        assert "识别健康管理目标" in labels
+        assert "规划执行步骤" in labels
         assert "整理术语解释" in labels
-        assert "检索本地知识中" in labels
+        assert ("检索本地知识中" in labels) or ("校验并调整计划" in labels)
         assert entry is not None
+        assert entry.memory is not None
+        assert entry.goal is not None
+        assert entry.plan is not None
         assert entry.execution is not None
         assert entry.execution.intent == "term_explanation"
+    finally:
+        llm_service.client = original_client
+
+
+def test_entry_graph_replans_to_collect_more_info_when_retrieval_has_no_docs(monkeypatch) -> None:
+    original_client = llm_service.client
+    llm_service.client = object()
+
+    monkeypatch.setattr(routing_service, "route", lambda message, has_report: "symptom_rag_advice")
+    monkeypatch.setattr(
+        llm_service,
+        "chat_json_fast",
+        lambda system_prompt, user_prompt: {
+            "intent": "symptom_rag_advice",
+            "rewritten_query": "乏力和头晕",
+            "normalized_term": "",
+            "use_local_knowledge": True,
+            "use_who": False,
+            "use_max": True,
+            "reason": "need_replan",
+        },
+    )
+    monkeypatch.setattr(knowledge_service, "retrieve", lambda session, query: [])
+
+    try:
+        with make_session() as session:
+            chat_session = ChatSession(title="replan-entry")
+            session.add(chat_session)
+            session.commit()
+            session.refresh(chat_session)
+
+            entry = react_agent_service._run_entry_graph(
+                session=session,
+                session_id=chat_session.id,
+                report_id=None,
+                message="我最近总是乏力和头晕，该怎么判断",
+            )
+
+        assert entry.plan is not None
+        assert entry.replan is not None
+        assert entry.replan.should_replan is True
+        assert entry.execution is not None
+        assert entry.execution.intent == "collect_more_info"
+        assert entry.execution.debug.get("replan")
     finally:
         llm_service.client = original_client
 
@@ -988,5 +1043,113 @@ def test_agent_response_can_hit_persistent_cache(monkeypatch) -> None:
 
         assert first.answer == second.answer
         assert calls["max"] == 1
+    finally:
+        llm_service.client = original_client
+
+
+def test_react_agent_response_contains_runtime_debug(monkeypatch) -> None:
+    original_client = llm_service.client
+    llm_service.client = object()
+
+    monkeypatch.setattr(routing_service, "route", lambda message, has_report: "term_explanation")
+    monkeypatch.setattr(
+        llm_service,
+        "chat_json_fast",
+        lambda system_prompt, user_prompt: {
+            "intent": "term_explanation",
+            "rewritten_query": "流感是什么",
+            "normalized_term": "流感",
+            "use_local_knowledge": True,
+            "use_who": False,
+            "use_max": True,
+            "reason": "runtime_debug",
+        },
+    )
+    monkeypatch.setattr(
+        llm_service,
+        "chat_text_max",
+        lambda system_prompt, user_prompt: "### 它是什么\n流感是由流感病毒引起的急性呼吸道传染病。\n\n### 温馨提示\n建议结合症状和流行季节综合判断。",
+    )
+
+    try:
+        with make_session() as session:
+            knowledge_service.seed_local_knowledge(session)
+            response = react_agent_service.respond(
+                session=session,
+                session_id=None,
+                report_id=None,
+                message="流感是什么",
+                output_dir=Path("."),
+            )
+
+        assert response.debug is not None
+        assert response.debug.memory
+        assert response.debug.goal
+        assert response.debug.task_run
+        assert response.debug.trace_summary
+        assert response.debug.task_run["status"] == "completed"
+    finally:
+        llm_service.client = original_client
+
+
+def test_entry_graph_loads_report_memory(monkeypatch) -> None:
+    original_client = llm_service.client
+    llm_service.client = object()
+
+    monkeypatch.setattr(routing_service, "route", lambda message, has_report: "report_follow_up")
+    monkeypatch.setattr(
+        llm_service,
+        "chat_json_fast",
+        lambda system_prompt, user_prompt: {
+            "intent": "report_follow_up",
+            "rewritten_query": "报告里的异常怎么继续跟踪",
+            "normalized_term": "",
+            "use_local_knowledge": True,
+            "use_who": False,
+            "use_max": True,
+            "reason": "memory_report",
+        },
+    )
+
+    try:
+        with make_session() as session:
+            report = Report(
+                file_name="report.pdf",
+                file_path="report.pdf",
+                raw_text="总胆固醇 6.00 mmol/L 3.1-5.2",
+                parse_status="parsed",
+            )
+            session.add(report)
+            session.commit()
+            session.refresh(report)
+            session.add(
+                LabItem(
+                    report_id=report.id,
+                    name="总胆固醇",
+                    value_raw="6.00",
+                    value_num=6.0,
+                    unit="mmol/L",
+                    reference_range="3.1-5.2",
+                    status="high",
+                )
+            )
+            session.commit()
+            from app.services.agent_memory_service import agent_memory_service
+
+            agent_memory_service.refresh_report_insight(session, report.id)
+            chat_session = ChatSession(title="memory-report", report_id=report.id)
+            session.add(chat_session)
+            session.commit()
+            session.refresh(chat_session)
+
+            entry = react_agent_service._run_entry_graph(
+                session=session,
+                session_id=chat_session.id,
+                report_id=report.id,
+                message="这份报告接下来要怎么跟踪",
+            )
+
+        assert entry.memory["report_insight"]["report_id"] == report.id
+        assert "总胆固醇" in entry.memory["report_insight"]["abnormal_item_names"]
     finally:
         llm_service.client = original_client

@@ -965,6 +965,36 @@ export default function App() {
                               <pre className="debug-pre">{formatDebugValue(message.meta.debug.synthesis)}</pre>
                             </section>
                           ) : null}
+                          {message.meta.debug.replan ? (
+                            <section className="debug-section">
+                              <h6>replan</h6>
+                              <pre className="debug-pre">{formatDebugValue(message.meta.debug.replan)}</pre>
+                            </section>
+                          ) : null}
+                          {message.meta.debug.memory ? (
+                            <section className="debug-section">
+                              <h6>memory</h6>
+                              <pre className="debug-pre">{formatDebugValue(message.meta.debug.memory)}</pre>
+                            </section>
+                          ) : null}
+                          {message.meta.debug.goal ? (
+                            <section className="debug-section">
+                              <h6>goal</h6>
+                              <pre className="debug-pre">{formatDebugValue(message.meta.debug.goal)}</pre>
+                            </section>
+                          ) : null}
+                          {message.meta.debug.task_run ? (
+                            <section className="debug-section">
+                              <h6>task_run</h6>
+                              <pre className="debug-pre">{formatDebugValue(message.meta.debug.task_run)}</pre>
+                            </section>
+                          ) : null}
+                          {message.meta.debug.trace_summary && message.meta.debug.trace_summary.length > 0 ? (
+                            <section className="debug-section">
+                              <h6>trace_summary</h6>
+                              <pre className="debug-pre">{formatDebugValue(message.meta.debug.trace_summary)}</pre>
+                            </section>
+                          ) : null}
                         </div>
                       </details>
                     ) : null}
