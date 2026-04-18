@@ -120,6 +120,48 @@ export async function streamChat(
   }
 }
 
+export async function streamAutoReportAnalysis(
+  sessionId: string,
+  reportId: string,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/reports/${reportId}/analysis/stream`, {
+    method: "POST",
+    headers: {
+      Accept: "text/event-stream",
+    },
+  });
+
+  if (!response.ok || !response.body) {
+    const fallback = await response.json().catch(() => ({ detail: "自动报告解读请求失败。" }));
+    throw new Error(fallback.detail ?? "自动报告解读请求失败。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    let boundaryIndex = buffer.indexOf("\n\n");
+    while (boundaryIndex !== -1) {
+      const rawEvent = buffer.slice(0, boundaryIndex);
+      buffer = buffer.slice(boundaryIndex + 2);
+      boundaryIndex = buffer.indexOf("\n\n");
+
+      const parsed = parseSseBlock(rawEvent);
+      if (parsed) {
+        onEvent(parsed);
+      }
+    }
+  }
+}
+
 export function streamReportProgress(reportId: string, onEvent: (event: ChatStreamEvent) => void): () => void {
   // 报告进度是 GET 场景，直接使用浏览器原生 EventSource 即可。
   const eventSource = new EventSource(`${API_BASE}/reports/${reportId}/stream`);

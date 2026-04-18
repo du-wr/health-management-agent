@@ -52,6 +52,7 @@ TERM_HEADINGS = {"它是什么", "常见表现或特点", "常见诱因或易感
 REPORT_HEADINGS = {"主要异常解读", "综合解读", "后续建议"}
 QUESTION_TAIL_PATTERN = re.compile(r"(是什么病|是什么|什么意思|啥意思|解释一下|科普一下)$")
 HEADING_PREFIX_PATTERN = re.compile(r"^(?:#{1,6}\s*|\d+[.)、]\s*|-+\s*)")
+AUTO_REPORT_ANALYSIS_PROMPT = "请直接分析这份刚上传完成的体检报告，优先说明主要异常、趋势关注点和下一步建议。"
 
 
 class AgentExecutionResult(BaseModel):
@@ -363,6 +364,9 @@ class ReactAgentService:
         report_id: str | None,
         message: str,
         output_dir: Path,
+        *,
+        persist_user_message: bool = True,
+        auto_title: bool = True,
     ) -> Iterator[dict[str, Any]]:
         """流式回答入口。
 
@@ -384,8 +388,10 @@ class ReactAgentService:
             payload={"session_id": chat_session.id, "report_id": report_id},
         )
         # 流式接口与同步接口共享同一套自动命名规则，保证会话列表表现一致。
-        session_service.auto_title_if_needed(session, chat_session.id, message)
-        self._store_message(session, chat_session.id, "user", message, agent_run_id=runtime.run_id)
+        if auto_title:
+            session_service.auto_title_if_needed(session, chat_session.id, message)
+        if persist_user_message:
+            self._store_message(session, chat_session.id, "user", message, agent_run_id=runtime.run_id)
         yield {"event": "session", "data": {"session_id": chat_session.id}}
 
         try:
@@ -551,6 +557,29 @@ class ReactAgentService:
             )
             agent_runtime_service.fail_run(session, runtime, str(exc))
             raise
+
+    def stream_report_auto_analysis(
+        self,
+        session: Session,
+        session_id: str,
+        report_id: str,
+        output_dir: Path,
+    ) -> Iterator[dict[str, Any]]:
+        """在报告解析完成后自动生成一条报告解读。
+
+        这里复用已有 Agent 主链，但不额外落一条“伪造的用户提问”，
+        这样聊天记录里只会出现自动生成的报告解读结果。
+        """
+
+        return self.stream_respond(
+            session,
+            session_id=session_id,
+            report_id=report_id,
+            message=AUTO_REPORT_ANALYSIS_PROMPT,
+            output_dir=output_dir,
+            persist_user_message=False,
+            auto_title=False,
+        )
 
     def _run_entry_graph(
         self,

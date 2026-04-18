@@ -46,21 +46,20 @@ type MessageRow = {
 };
 
 const INTENT_LABELS: Record<string, string> = {
-  report_follow_up: "报告追问",
-  term_explanation: "术语解释",
-  symptom_rag_advice: "症状建议",
-  collect_more_info: "补充信息",
-  safety_handoff: "安全转诊",
+  report_follow_up: "鎶ュ憡杩介棶",
+  term_explanation: "鏈瑙ｉ噴",
+  symptom_rag_advice: "鐥囩姸寤鸿",
+  collect_more_info: "琛ュ厖淇℃伅",
+  safety_handoff: "瀹夊叏杞瘖",
 };
 
 const SAFETY_LABELS: Record<string, string> = {
-  safe: "安全",
-  caution: "需谨慎",
-  handoff: "建议线下就医",
+  safe: "瀹夊叏",
+  caution: "闇€璋ㄦ厧",
+  handoff: "寤鸿绾夸笅灏卞尰",
 };
 
-// 这里只做轻量级加粗渲染，避免为了当前工作台额外引入 Markdown 运行时依赖。
-function renderInline(text: string): ReactNode[] {
+// 杩欓噷鍙仛杞婚噺绾у姞绮楁覆鏌擄紝閬垮厤涓轰簡褰撳墠宸ヤ綔鍙伴澶栧紩鍏?Markdown 杩愯鏃朵緷璧栥€?function renderInline(text: string): ReactNode[] {
   const parts = text.split(/(\*\*.*?\*\*)/g).filter(Boolean);
   return parts.map((part, index) => {
     const match = /^\*\*(.*?)\*\*$/.exec(part);
@@ -75,8 +74,7 @@ function renderParagraph(text: string, className?: string): ReactNode {
   return <p className={className}>{renderInline(text)}</p>;
 }
 
-// 对助手消息做简单的结构化排版，支持标题、列表和提示块，保证医疗回答更易扫描。
-function renderMessageContent(content: string): ReactNode {
+// 瀵瑰姪鎵嬫秷鎭仛绠€鍗曠殑缁撴瀯鍖栨帓鐗堬紝鏀寔鏍囬銆佸垪琛ㄥ拰鎻愮ず鍧楋紝淇濊瘉鍖荤枟鍥炵瓟鏇存槗鎵弿銆?function renderMessageContent(content: string): ReactNode {
   const normalized = content.replace(/\r\n/g, "\n").trim();
   if (!normalized) {
     return null;
@@ -145,7 +143,7 @@ function renderMessageContent(content: string): ReactNode {
     }
 
     const merged = lines.join(" ");
-    if (/^(重要提示|温馨提示|注意|说明)[:：]/.test(merged)) {
+    if (/^(閲嶈鎻愮ず|娓╅Θ鎻愮ず|娉ㄦ剰|璇存槑)[:锛歖/.test(merged)) {
       return (
         <div className="message-note" key={`block-${blockIndex}`}>
           {renderParagraph(merged)}
@@ -173,34 +171,34 @@ function formatDebugValue(value: unknown): string {
 
 function tracePhaseText(phase: string): string {
   const mapping: Record<string, string> = {
-    session: "会话",
-    entry: "入口图",
-    cache: "缓存",
-    execution: "工具执行",
-    compose: "生成",
-    response: "响应",
-    error: "异常",
+    session: "浼氳瘽",
+    entry: "鍏ュ彛鍥?,
+    cache: "缂撳瓨",
+    execution: "宸ュ叿鎵ц",
+    compose: "鐢熸垚",
+    response: "鍝嶅簲",
+    error: "寮傚父",
   };
   return mapping[phase] ?? phase;
 }
 
 function runStatusText(status: string): string {
   const mapping: Record<string, string> = {
-    running: "进行中",
-    completed: "已完成",
-    handoff: "已转交",
-    failed: "失败",
+    running: "杩涜涓?,
+    completed: "宸插畬鎴?,
+    handoff: "宸茶浆浜?,
+    failed: "澶辫触",
   };
   return mapping[status] ?? status;
 }
 
 function reportStatusText(status: string): string {
-  if (status === "uploaded") return "已上传";
-  if (status === "queued") return "排队中";
-  if (status === "processing") return "解析中";
-  if (status === "parsed") return "已完成";
-  if (status === "needs_review") return "需复核";
-  if (status === "error") return "失败";
+  if (status === "uploaded") return "宸蹭笂浼?;
+  if (status === "queued") return "鎺掗槦涓?;
+  if (status === "processing") return "瑙ｆ瀽涓?;
+  if (status === "parsed") return "宸插畬鎴?;
+  if (status === "needs_review") return "闇€澶嶆牳";
+  if (status === "error") return "澶辫触";
   return status;
 }
 
@@ -215,14 +213,14 @@ function reportTone(status?: string | null): "ready" | "working" | "warning" | "
 
 function intentText(intent?: string | null): string {
   if (!intent) {
-    return "未分类";
+    return "鏈垎绫?;
   }
   return INTENT_LABELS[intent] ?? intent;
 }
 
 function safetyText(level?: string | null): string {
   if (!level) {
-    return "未标记";
+    return "鏈爣璁?;
   }
   return SAFETY_LABELS[level] ?? level;
 }
@@ -246,9 +244,9 @@ function formatRelativeTime(isoText?: string | null): string {
 function formatSummaryLabel(isoText: string, index: number): string {
   const value = new Date(isoText);
   if (Number.isNaN(value.getTime())) {
-    return `小结版本 ${index + 1}`;
+    return `灏忕粨鐗堟湰 ${index + 1}`;
   }
-  return `小结 ${value.toLocaleString("zh-CN", {
+  return `灏忕粨 ${value.toLocaleString("zh-CN", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -258,23 +256,22 @@ function formatSummaryLabel(isoText: string, index: number): string {
 
 function reportNarrative(report: ReportParseResult | null, progress: ReportProgressPayload | null): string {
   if (!report) {
-    return "上传体检报告后，这里会持续展示解析阶段、异常指标和后续可生成的小结。";
+    return "涓婁紶浣撴鎶ュ憡鍚庯紝杩欓噷浼氭寔缁睍绀鸿В鏋愰樁娈点€佸紓甯告寚鏍囧拰鍚庣画鍙敓鎴愮殑灏忕粨銆?;
   }
   if (report.parse_status === "error") {
-    return "解析失败，请重新上传更清晰的报告，或稍后再次尝试。";
+    return "瑙ｆ瀽澶辫触锛岃閲嶆柊涓婁紶鏇存竻鏅扮殑鎶ュ憡锛屾垨绋嶅悗鍐嶆灏濊瘯銆?;
   }
   if (report.parse_status === "needs_review") {
-    return "报告已提取出初步结果，但仍建议人工复核关键字段。";
+    return "鎶ュ憡宸叉彁鍙栧嚭鍒濇缁撴灉锛屼絾浠嶅缓璁汉宸ュ鏍稿叧閿瓧娈点€?;
   }
   if (report.parse_status === "parsed") {
-    return "解析已完成，可以围绕异常指标继续追问，并生成健康小结。";
+    return "瑙ｆ瀽宸插畬鎴愶紝鍙互鍥寸粫寮傚父鎸囨爣缁х画杩介棶锛屽苟鐢熸垚鍋ュ悍灏忕粨銆?;
   }
-  return progress?.label ?? "报告已经进入解析队列，系统会持续更新当前阶段。";
+  return progress?.label ?? "鎶ュ憡宸茬粡杩涘叆瑙ｆ瀽闃熷垪锛岀郴缁熶細鎸佺画鏇存柊褰撳墠闃舵銆?;
 }
 
 function mapHistoryMessage(message: SessionMessage): MessageRow {
-  // 历史消息只恢复当前工作台真正需要展示的字段，避免把后端对象直接泄漏到视图层。
-  return {
+  // 鍘嗗彶娑堟伅鍙仮澶嶅綋鍓嶅伐浣滃彴鐪熸闇€瑕佸睍绀虹殑瀛楁锛岄伩鍏嶆妸鍚庣瀵硅薄鐩存帴娉勬紡鍒拌鍥惧眰銆?  return {
     id: message.message_id,
     role: message.role === "assistant" ? "assistant" : "user",
     content: message.content,
@@ -332,26 +329,26 @@ export default function App() {
   const latestSummary = summaryHistory[0] ?? null;
   const reportSummaryLine = report
     ? report.parse_status === "parsed"
-      ? `已完成解析，识别出 ${abnormalCount} 项异常，可直接继续追问。`
+      ? `宸插畬鎴愯В鏋愶紝璇嗗埆鍑?${abnormalCount} 椤瑰紓甯革紝鍙洿鎺ョ户缁拷闂€俙
       : report.parse_status === "needs_review"
-        ? "已提取初步结果，建议结合原始报告继续复核。"
+        ? "宸叉彁鍙栧垵姝ョ粨鏋滐紝寤鸿缁撳悎鍘熷鎶ュ憡缁х画澶嶆牳銆?
         : reportNarrative(report, reportProgress)
-    : "上传体检报告后，这里会自动关联当前会话。";
+    : "涓婁紶浣撴鎶ュ憡鍚庯紝杩欓噷浼氳嚜鍔ㄥ叧鑱斿綋鍓嶄細璇濄€?;
   const summarySummaryLine = summaryHistory.length > 0
-    ? `已有 ${summaryHistory.length} 份健康小结，最新版可直接查看或下载。`
-    : "生成健康小结后，这里会保留历史版本和 PDF 下载入口。";
+    ? `宸叉湁 ${summaryHistory.length} 浠藉仴搴峰皬缁擄紝鏈€鏂扮増鏈彲鐩存帴鏌ョ湅鎴栦笅杞姐€俙
+    : "鐢熸垚鍋ュ悍灏忕粨鍚庯紝杩欓噷浼氫繚鐣欏巻鍙茬増鏈拰 PDF 涓嬭浇鍏ュ彛銆?;
   const summaryExcerpt =
     selectedSummary?.markdown
       .split("\n")
       .map((line) => line.trim())
-      .find(Boolean) ?? "生成健康小结后，这里会展示最新版本的摘要预览。";
+      .find(Boolean) ?? "鐢熸垚鍋ュ悍灏忕粨鍚庯紝杩欓噷浼氬睍绀烘渶鏂扮増鏈殑鎽樿棰勮銆?;
 
   const heroDescription = report
-    ? "围绕已上传的体检报告、历史追问和健康小结持续推进当前会话。"
-    : "先发起医学问题，或上传体检报告建立病例上下文，随后围绕异常指标继续追问。";
+    ? "鍥寸粫宸蹭笂浼犵殑浣撴鎶ュ憡銆佸巻鍙茶拷闂拰鍋ュ悍灏忕粨鎸佺画鎺ㄨ繘褰撳墠浼氳瘽銆?
+    : "鍏堝彂璧峰尰瀛﹂棶棰橈紝鎴栦笂浼犱綋妫€鎶ュ憡寤虹珛鐥呬緥涓婁笅鏂囷紝闅忓悗鍥寸粫寮傚父鎸囨爣缁х画杩介棶銆?;
   const composerPlaceholder = report
-    ? "例如：这份报告里总胆固醇偏高意味着什么？接下来建议做哪些复查？"
-    : "例如：幽门螺杆菌阳性是什么意思？上传体检报告后还能围绕异常指标继续追问。";
+    ? "渚嬪锛氳繖浠芥姤鍛婇噷鎬昏儐鍥洪唶鍋忛珮鎰忓懗鐫€浠€涔堬紵鎺ヤ笅鏉ュ缓璁仛鍝簺澶嶆煡锛?
+    : "渚嬪锛氬菇闂ㄨ灪鏉嗚弻闃虫€ф槸浠€涔堟剰鎬濓紵涓婁紶浣撴鎶ュ憡鍚庤繕鑳藉洿缁曞紓甯告寚鏍囩户缁拷闂€?;
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -366,8 +363,7 @@ export default function App() {
   }, []);
 
   function resetWorkspaceView() {
-    // 切换会话前先清空右侧上下文状态，避免上一会话的报告和小结残留到新会话。
-    closeReportStreamRef.current?.();
+    // 鍒囨崲浼氳瘽鍓嶅厛娓呯┖鍙充晶涓婁笅鏂囩姸鎬侊紝閬垮厤涓婁竴浼氳瘽鐨勬姤鍛婂拰灏忕粨娈嬬暀鍒版柊浼氳瘽銆?    closeReportStreamRef.current?.();
     closeReportStreamRef.current = null;
     setMessages([]);
     setReport(null);
@@ -384,14 +380,12 @@ export default function App() {
   }
 
   function applySummaryHistory(nextSummaries: SummaryArtifact[]) {
-    // 小结列表和默认选中项必须一起更新，避免弹窗预览和列表高亮不同步。
-    setSummaryHistory(nextSummaries);
+    // 灏忕粨鍒楄〃鍜岄粯璁ら€変腑椤瑰繀椤讳竴璧锋洿鏂帮紝閬垮厤寮圭獥棰勮鍜屽垪琛ㄩ珮浜笉鍚屾銆?    setSummaryHistory(nextSummaries);
     setSelectedSummaryId(nextSummaries[0]?.summary_id ?? null);
   }
 
   async function bootstrapWorkspace() {
-    // 首次进入页面时优先恢复会话工作台，没有历史会话时自动补一个空会话。
-    setLoadingSession(true);
+    // 棣栨杩涘叆椤甸潰鏃朵紭鍏堟仮澶嶄細璇濆伐浣滃彴锛屾病鏈夊巻鍙蹭細璇濇椂鑷姩琛ヤ竴涓┖浼氳瘽銆?    setLoadingSession(true);
     setError(null);
     try {
       const loadedSessions = await listSessions();
@@ -405,7 +399,7 @@ export default function App() {
       setSessions(loadedSessions);
       await loadSessionWorkspace(loadedSessions[0].session_id, loadedSessions);
     } catch (workspaceError) {
-      setError(workspaceError instanceof Error ? workspaceError.message : "初始化会话失败。");
+      setError(workspaceError instanceof Error ? workspaceError.message : "鍒濆鍖栦細璇濆け璐ャ€?);
     } finally {
       setLoadingSession(false);
     }
@@ -421,8 +415,7 @@ export default function App() {
   }
 
   async function loadSessionWorkspace(sessionId: string, cachedSessions?: SessionSummary[]) {
-    // 进入某个会话时并行恢复：基础信息、消息历史、小结历史、报告状态。
-    resetWorkspaceView();
+    // 杩涘叆鏌愪釜浼氳瘽鏃跺苟琛屾仮澶嶏細鍩虹淇℃伅銆佹秷鎭巻鍙层€佸皬缁撳巻鍙层€佹姤鍛婄姸鎬併€?    resetWorkspaceView();
     setLoadingSession(true);
     setError(null);
     setActiveSessionId(sessionId);
@@ -455,15 +448,14 @@ export default function App() {
       }
     } catch (sessionError) {
       resetWorkspaceView();
-      setError(sessionError instanceof Error ? sessionError.message : "加载会话失败。");
+      setError(sessionError instanceof Error ? sessionError.message : "鍔犺浇浼氳瘽澶辫触銆?);
     } finally {
       setLoadingSession(false);
     }
   }
 
   async function refreshAgentRuns(sessionId: string, preferredRunId?: string | null) {
-    // Agent 轨迹只在调试抽屉打开后按需加载，避免给普通聊天流增加额外压力。
-    setLoadingRuns(true);
+    // Agent 杞ㄨ抗鍙湪璋冭瘯鎶藉眽鎵撳紑鍚庢寜闇€鍔犺浇锛岄伩鍏嶇粰鏅€氳亰澶╂祦澧炲姞棰濆鍘嬪姏銆?    setLoadingRuns(true);
     try {
       const runs = await listSessionAgentRuns(sessionId);
       setAgentRuns(runs);
@@ -475,7 +467,7 @@ export default function App() {
         setSelectedRunDetail(null);
       }
     } catch (runsError) {
-      setError(runsError instanceof Error ? runsError.message : "加载 Agent 运行列表失败。");
+      setError(runsError instanceof Error ? runsError.message : "鍔犺浇 Agent 杩愯鍒楄〃澶辫触銆?);
     } finally {
       setLoadingRuns(false);
     }
@@ -487,7 +479,7 @@ export default function App() {
       const detail = await getAgentRunDetail(runId);
       setSelectedRunDetail(detail);
     } catch (detailError) {
-      setError(detailError instanceof Error ? detailError.message : "加载 Agent 轨迹失败。");
+      setError(detailError instanceof Error ? detailError.message : "鍔犺浇 Agent 杞ㄨ抗澶辫触銆?);
     } finally {
       setLoadingRunDetail(false);
     }
@@ -502,15 +494,14 @@ export default function App() {
   }
 
   async function runAutoReportAnalysis(sessionId: string, reportId: string) {
-    // 报告解析完成后直接生成一条自动解读，避免用户再手动输入分析命令。
-    const assistantId = crypto.randomUUID();
+    // 鎶ュ憡瑙ｆ瀽瀹屾垚鍚庣洿鎺ョ敓鎴愪竴鏉¤嚜鍔ㄨВ璇伙紝閬垮厤鐢ㄦ埛鍐嶆墜鍔ㄨ緭鍏ュ垎鏋愬懡浠ゃ€?    const assistantId = crypto.randomUUID();
     setMessages((previous) => [
       ...previous,
       {
         id: assistantId,
         role: "assistant",
         content: "",
-        statusLabel: "报告解析完成，正在生成自动解读...",
+        statusLabel: "鎶ュ憡瑙ｆ瀽瀹屾垚锛屾鍦ㄧ敓鎴愯嚜鍔ㄨВ璇?,
         streaming: true,
       },
     ]);
@@ -526,7 +517,7 @@ export default function App() {
 
         if (event.event === "status") {
           const data = getStreamEventData<{ label: string }>(event);
-          const cacheHit = data.label.includes("命中缓存");
+          const cacheHit = data.label.includes("鍛戒腑缂撳瓨");
           setMessages((previous) =>
             previous.map((item) =>
               item.id === assistantId
@@ -547,7 +538,7 @@ export default function App() {
           setMessages((previous) =>
             previous.map((item) =>
               item.id === assistantId
-                ? { ...item, content: `${item.content}${data.text}`, statusLabel: "正在生成报告解读", streaming: true }
+                ? { ...item, content: `${item.content}${data.text}`, statusLabel: "姝ｅ湪鐢熸垚鎶ュ憡瑙ｈ", streaming: true }
                 : item,
             ),
           );
@@ -581,7 +572,7 @@ export default function App() {
         await refreshAgentRuns(sessionId, latestRunId);
       }
     } catch (analysisError) {
-      setError(analysisError instanceof Error ? analysisError.message : "自动报告解读失败。");
+      setError(analysisError instanceof Error ? analysisError.message : "鑷姩鎶ュ憡瑙ｈ澶辫触銆?);
       setMessages((previous) =>
         previous.map((item) =>
           item.id === assistantId
@@ -589,7 +580,7 @@ export default function App() {
                 ...item,
                 statusLabel: null,
                 streaming: false,
-                content: item.content || "报告已上传成功，但自动解读失败，你可以继续手动提问。",
+                content: item.content || "鎶ュ憡宸蹭笂浼犳垚鍔燂紝浣嗚嚜鍔ㄨВ璇诲け璐ワ紝浣犲彲浠ョ户缁墜鍔ㄦ彁闂€?,
               }
             : item,
         ),
@@ -600,8 +591,7 @@ export default function App() {
   }
 
   function subscribeReportProgress(reportId: string, sessionId: string) {
-    // 报告解析流只服务当前激活会话，切走后立即断开，避免状态串到别的会话里。
-    closeReportStreamRef.current?.();
+    // 鎶ュ憡瑙ｆ瀽娴佸彧鏈嶅姟褰撳墠婵€娲讳細璇濓紝鍒囪蛋鍚庣珛鍗虫柇寮€锛岄伩鍏嶇姸鎬佷覆鍒板埆鐨勪細璇濋噷銆?    closeReportStreamRef.current?.();
     closeReportStreamRef.current = streamReportProgress(reportId, (event) => {
       if (activeSessionIdRef.current !== sessionId) {
         return;
@@ -622,7 +612,7 @@ export default function App() {
         setReportProgress({
           report_id: data.report_id,
           stage: data.parse_status === "error" ? "failed" : "completed",
-          label: data.parse_status === "error" ? "报告解析失败" : "报告解析完成",
+          label: data.parse_status === "error" ? "鎶ュ憡瑙ｆ瀽澶辫触" : "鎶ュ憡瑙ｆ瀽瀹屾垚",
           progress: 100,
           parse_status: data.parse_status,
           done: true,
@@ -630,22 +620,20 @@ export default function App() {
         });
         closeReportStreamRef.current?.();
         closeReportStreamRef.current = null;
-        if (data.parse_status === "parsed" || data.parse_status === "needs_review") {
-          const shouldRunAutoAnalysis = pendingAutoAnalysisReportIdRef.current === reportId;
-          pendingAutoAnalysisReportIdRef.current = null;
-          if (shouldRunAutoAnalysis) {
-            void runAutoReportAnalysis(sessionId, reportId);
-          }
-        } else {
-          pendingAutoAnalysisReportIdRef.current = null;
-        }
         void refreshSessionList(sessionId);
+        if (
+          pendingAutoAnalysisReportIdRef.current === data.report_id &&
+          ["parsed", "needs_review"].includes(data.parse_status)
+        ) {
+          pendingAutoAnalysisReportIdRef.current = null;
+          void runAutoReportAnalysis(sessionId, data.report_id);
+        }
         return;
       }
 
       if (event.event === "error") {
         const data = getStreamEventData<{ detail?: string }>(event);
-        setError(data.detail ?? "报告进度流连接失败。");
+        setError(data.detail ?? "鎶ュ憡杩涘害娴佽繛鎺ュけ璐ャ€?);
       }
     });
   }
@@ -663,7 +651,7 @@ export default function App() {
       setSessions(nextSessions);
       await loadSessionWorkspace(created.session_id, nextSessions);
     } catch (createError) {
-      setError(createError instanceof Error ? createError.message : "新建会话失败。");
+      setError(createError instanceof Error ? createError.message : "鏂板缓浼氳瘽澶辫触銆?);
     } finally {
       setBusy(null);
     }
@@ -689,7 +677,7 @@ export default function App() {
   async function submitRename(sessionId: string) {
     const nextTitle = renameDraft.trim();
     if (!nextTitle) {
-      setError("会话标题不能为空。");
+      setError("浼氳瘽鏍囬涓嶈兘涓虹┖銆?);
       return;
     }
 
@@ -700,7 +688,7 @@ export default function App() {
       await refreshSessionList(sessionId);
       cancelRename();
     } catch (renameError) {
-      setError(renameError instanceof Error ? renameError.message : "重命名失败。");
+      setError(renameError instanceof Error ? renameError.message : "閲嶅懡鍚嶅け璐ャ€?);
     } finally {
       setBusy(null);
     }
@@ -716,7 +704,7 @@ export default function App() {
       return;
     }
 
-    const confirmed = window.confirm(`确认删除会话“${sessionItem.title}”吗？该会话的历史消息和健康小结会一并清理。`);
+    const confirmed = window.confirm(`纭鍒犻櫎浼氳瘽鈥?{sessionItem.title}鈥濆悧锛熻浼氳瘽鐨勫巻鍙叉秷鎭拰鍋ュ悍灏忕粨浼氫竴骞舵竻鐞嗐€俙);
     if (!confirmed) {
       return;
     }
@@ -747,7 +735,7 @@ export default function App() {
         await loadSessionWorkspace(fallbackSession.session_id, remainingSessions);
       }
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "删除会话失败。");
+      setError(deleteError instanceof Error ? deleteError.message : "鍒犻櫎浼氳瘽澶辫触銆?);
     } finally {
       setDeletingSessionId(null);
       setBusy(null);
@@ -762,14 +750,13 @@ export default function App() {
   }
 
   async function handleReportFileChange(event: ChangeEvent<HTMLInputElement>) {
-    // 上传新报告时要同步清掉旧小结，因为后续小结必须绑定新的报告语境。
-    const file = event.target.files?.[0] ?? null;
+    // 涓婁紶鏂版姤鍛婃椂瑕佸悓姝ユ竻鎺夋棫灏忕粨锛屽洜涓哄悗缁皬缁撳繀椤荤粦瀹氭柊鐨勬姤鍛婅澧冦€?    const file = event.target.files?.[0] ?? null;
     event.target.value = "";
     if (!file) {
       return;
     }
     if (!activeSessionId) {
-      setError("请先创建会话，再上传报告。");
+      setError("璇峰厛鍒涘缓浼氳瘽锛屽啀涓婁紶鎶ュ憡銆?);
       return;
     }
 
@@ -777,8 +764,6 @@ export default function App() {
     setError(null);
     applySummaryHistory([]);
     setSummaryOpen(false);
-    setReportContextExpanded(false);
-    setSummaryContextExpanded(false);
     try {
       const result = await uploadReportToSession(activeSessionId, file);
       pendingAutoAnalysisReportIdRef.current = result.report_id;
@@ -786,7 +771,7 @@ export default function App() {
       setReportProgress({
         report_id: result.report_id,
         stage: "queued",
-        label: "上传完成，等待开始解析",
+        label: "涓婁紶瀹屾垚锛岀瓑寰呭紑濮嬭В鏋?,
         progress: 5,
         parse_status: result.parse_status,
         done: false,
@@ -795,17 +780,16 @@ export default function App() {
       subscribeReportProgress(result.report_id, activeSessionId);
       await refreshSessionList(activeSessionId);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "上传失败。");
+      setError(uploadError instanceof Error ? uploadError.message : "涓婁紶澶辫触銆?);
     } finally {
       setBusy(null);
     }
   }
 
   async function handleChatSubmit(event: FormEvent<HTMLFormElement>) {
-    // 聊天流用一个临时助手气泡承接状态、增量文本和最终结构化返回。
-    event.preventDefault();
+    // 鑱婂ぉ娴佺敤涓€涓复鏃跺姪鎵嬫皵娉℃壙鎺ョ姸鎬併€佸閲忔枃鏈拰鏈€缁堢粨鏋勫寲杩斿洖銆?    event.preventDefault();
     if (!activeSessionId) {
-      setError("请先创建会话。");
+      setError("璇峰厛鍒涘缓浼氳瘽銆?);
       return;
     }
     if (!prompt.trim()) {
@@ -819,7 +803,7 @@ export default function App() {
     setMessages((previous) => [
       ...previous,
       { id: crypto.randomUUID(), role: "user", content: currentPrompt, createdAt: new Date().toISOString() },
-      { id: assistantId, role: "assistant", content: "", statusLabel: "正在分析问题", streaming: true },
+      { id: assistantId, role: "assistant", content: "", statusLabel: "姝ｅ湪鍒嗘瀽闂", streaming: true },
     ]);
     setBusy("chat");
     setError(null);
@@ -839,14 +823,13 @@ export default function App() {
 
           if (event.event === "status") {
             const data = getStreamEventData<{ label: string }>(event);
-            const cacheHit = data.label.includes("命中缓存");
+            const cacheHit = data.label.includes("鍛戒腑缂撳瓨");
             setMessages((previous) =>
               previous.map((item) =>
                 item.id === assistantId
                   ? {
                       ...item,
-                      // “命中缓存”需要保留在消息上，避免后续 delta/final 把这条提示冲掉。
-                      cacheHit: item.cacheHit || cacheHit,
+                      // 鈥滃懡涓紦瀛樷€濋渶瑕佷繚鐣欏湪娑堟伅涓婏紝閬垮厤鍚庣画 delta/final 鎶婅繖鏉℃彁绀哄啿鎺夈€?                      cacheHit: item.cacheHit || cacheHit,
                       statusLabel: data.label,
                       streaming: true,
                     }
@@ -861,7 +844,7 @@ export default function App() {
             setMessages((previous) =>
               previous.map((item) =>
                 item.id === assistantId
-                  ? { ...item, content: `${item.content}${data.text}`, statusLabel: "正在生成回答", streaming: true }
+                  ? { ...item, content: `${item.content}${data.text}`, statusLabel: "姝ｅ湪鐢熸垚鍥炵瓟", streaming: true }
                   : item,
               ),
             );
@@ -892,7 +875,7 @@ export default function App() {
 
           if (event.event === "error") {
             const data = getStreamEventData<{ detail?: string }>(event);
-            setError(data.detail ?? "流式响应失败。");
+            setError(data.detail ?? "娴佸紡鍝嶅簲澶辫触銆?);
           }
         },
       );
@@ -902,10 +885,10 @@ export default function App() {
         await refreshAgentRuns(sessionId, latestRunId);
       }
     } catch (chatError) {
-      setError(chatError instanceof Error ? chatError.message : "对话请求失败。");
+      setError(chatError instanceof Error ? chatError.message : "瀵硅瘽璇锋眰澶辫触銆?);
       setMessages((previous) =>
         previous.map((item) =>
-          item.id === assistantId ? { ...item, statusLabel: null, streaming: false, content: item.content || "请求失败。" } : item,
+          item.id === assistantId ? { ...item, statusLabel: null, streaming: false, content: item.content || "璇锋眰澶辫触銆? } : item,
         ),
       );
     } finally {
@@ -914,17 +897,16 @@ export default function App() {
   }
 
   async function handleGenerateSummary() {
-    // 小结生成依赖当前会话已经绑定的报告和对话上下文，所以这里直接走会话级接口。
-    if (!activeSessionId) {
-      setError("请先创建会话。");
+    // 灏忕粨鐢熸垚渚濊禆褰撳墠浼氳瘽宸茬粡缁戝畾鐨勬姤鍛婂拰瀵硅瘽涓婁笅鏂囷紝鎵€浠ヨ繖閲岀洿鎺ヨ蛋浼氳瘽绾ф帴鍙ｃ€?    if (!activeSessionId) {
+      setError("璇峰厛鍒涘缓浼氳瘽銆?);
       return;
     }
     if (!report) {
-      setError("请先上传报告，再生成健康小结。");
+      setError("璇峰厛涓婁紶鎶ュ憡锛屽啀鐢熸垚鍋ュ悍灏忕粨銆?);
       return;
     }
     if (!reportReady) {
-      setError("报告仍在解析中，请稍后再生成健康小结。");
+      setError("鎶ュ憡浠嶅湪瑙ｆ瀽涓紝璇风◢鍚庡啀鐢熸垚鍋ュ悍灏忕粨銆?);
       return;
     }
 
@@ -937,7 +919,7 @@ export default function App() {
       setSelectedSummaryId(result.summary_id);
       setSummaryOpen(true);
     } catch (summaryError) {
-      setError(summaryError instanceof Error ? summaryError.message : "健康小结生成失败。");
+      setError(summaryError instanceof Error ? summaryError.message : "鍋ュ悍灏忕粨鐢熸垚澶辫触銆?);
     } finally {
       setBusy(null);
     }
@@ -947,11 +929,11 @@ export default function App() {
     <main className="workspace-shell">
       <aside className="session-sidebar">
         <div className="sidebar-brand">
-          <h1>历史会话</h1>
+          <h1>鍘嗗彶浼氳瘽</h1>
         </div>
 
         <button className="primary-button sidebar-create-button" type="button" onClick={handleCreateSession} disabled={interactionLocked}>
-          {busy === "create-session" ? "正在创建..." : "新建会话"}
+          {busy === "create-session" ? "姝ｅ湪鍒涘缓..." : "鏂板缓浼氳瘽"}
         </button>
 
         <div className="session-list">
@@ -989,16 +971,16 @@ export default function App() {
                     ) : (
                       <>
                         <strong className="session-title">{sessionItem.title}</strong>
-                        {sessionItem.report ? <span className="session-inline-chip">已附报告</span> : null}
+                        {sessionItem.report ? <span className="session-inline-chip">宸查檮鎶ュ憡</span> : null}
                       </>
                     )}
                   </div>
 
-                  <span className="session-preview">{sessionItem.last_message_preview || "暂无消息，等待新的问题或报告。"}</span>
+                  <span className="session-preview">{sessionItem.last_message_preview || "鏆傛棤娑堟伅锛岀瓑寰呮柊鐨勯棶棰樻垨鎶ュ憡銆?}</span>
 
                   <span className="session-meta">
-                    <span>{formatRelativeTime(sessionItem.last_message_at) || "刚刚创建"}</span>
-                    <span>{sessionItem.message_count} 条消息</span>
+                    <span>{formatRelativeTime(sessionItem.last_message_at) || "鍒氬垰鍒涘缓"}</span>
+                    <span>{sessionItem.message_count} 鏉℃秷鎭?/span>
                   </span>
                 </button>
 
@@ -1006,19 +988,18 @@ export default function App() {
                   {renaming ? (
                     <>
                       <button className="text-button" type="button" onClick={() => void submitRename(sessionItem.session_id)} disabled={interactionLocked}>
-                        保存
+                        淇濆瓨
                       </button>
                       <button className="text-button subtle" type="button" onClick={cancelRename} disabled={interactionLocked}>
-                        取消
+                        鍙栨秷
                       </button>
                     </>
                   ) : (
                     <>
                       <button className="text-button subtle" type="button" onClick={() => startRename(sessionItem)} disabled={interactionLocked}>
-                        重命名
-                      </button>
+                        閲嶅懡鍚?                      </button>
                       <button className="text-button danger" type="button" onClick={() => void handleDeleteSession(sessionItem.session_id)} disabled={interactionLocked}>
-                        {deleting ? "删除中..." : "删除"}
+                        {deleting ? "鍒犻櫎涓?.." : "鍒犻櫎"}
                       </button>
                     </>
                   )}
@@ -1036,40 +1017,40 @@ export default function App() {
           <header className={`workspace-hero ${hasConversation ? "compact" : ""}`}>
             <div className="workspace-hero-copy">
               <p className="eyebrow">Medical Workspace</p>
-              <h2>{activeSession?.title ?? "健康咨询会话"}</h2>
+              <h2>{activeSession?.title ?? "鍋ュ悍鍜ㄨ浼氳瘽"}</h2>
               <p className="workspace-hero-description">{heroDescription}</p>
             </div>
             <div className="panel-heading-meta">
-              <span className={`status-pill tone-${reportStateTone}`}>{report ? reportStatusText(report.parse_status) : "未绑定报告"}</span>
-              {summaryHistory.length > 0 ? <span className="status-pill tone-ready">已有健康小结</span> : null}
+              <span className={`status-pill tone-${reportStateTone}`}>{report ? reportStatusText(report.parse_status) : "鏈粦瀹氭姤鍛?}</span>
+              {summaryHistory.length > 0 ? <span className="status-pill tone-ready">宸叉湁鍋ュ悍灏忕粨</span> : null}
             </div>
           </header>
 
           <div className={`workspace-context-bar ${hasConversation ? "compact" : ""}`}>
-            <span className="context-pill">当前会话：{activeSession?.title ?? "未命名会话"}</span>
-            <span className="context-pill">消息 {activeSession?.message_count ?? 0}</span>
-            {report ? <span className="context-pill">异常指标 {abnormalCount}</span> : null}
-            {reportProgress ? <span className="context-pill">解析进度 {progressValue}%</span> : null}
-            {summaryHistory.length > 0 ? <span className="context-pill">小结 {summaryHistory.length} 份</span> : null}
+            <span className="context-pill">褰撳墠浼氳瘽锛歿activeSession?.title ?? "鏈懡鍚嶄細璇?}</span>
+            <span className="context-pill">娑堟伅 {activeSession?.message_count ?? 0}</span>
+            {report ? <span className="context-pill">寮傚父鎸囨爣 {abnormalCount}</span> : null}
+            {reportProgress ? <span className="context-pill">瑙ｆ瀽杩涘害 {progressValue}%</span> : null}
+            {summaryHistory.length > 0 ? <span className="context-pill">灏忕粨 {summaryHistory.length} 浠?/span> : null}
             <button className="context-pill action" type="button" onClick={() => void openTraceDrawer()} disabled={!activeSessionId}>
-              Agent 轨迹
+              Agent 杞ㄨ抗
             </button>
           </div>
 
           <div className={`chat-window ${hasConversation ? "expanded" : ""}`}>
-            {loadingSession ? <p className="muted">正在加载会话...</p> : null}
+            {loadingSession ? <p className="muted">姝ｅ湪鍔犺浇浼氳瘽...</p> : null}
 
             {!loadingSession && messages.length === 0 ? (
               <div className="empty-chat-state">
                 <p className="section-label">Medical Agent</p>
-                <h3>从一个问题开始，或先上传体检报告</h3>
+                <h3>浠庝竴涓棶棰樺紑濮嬶紝鎴栧厛涓婁紶浣撴鎶ュ憡</h3>
                 <p>{heroDescription}</p>
                 <div className="empty-chat-actions">
                   <button className="secondary-button" type="button" onClick={triggerReportUpload} disabled={!activeSessionId || interactionLocked}>
-                    上传体检报告
+                    涓婁紶浣撴鎶ュ憡
                   </button>
                   <button className="secondary-button" type="button" onClick={handleGenerateSummary} disabled={interactionLocked || !report || !reportReady}>
-                    生成健康小结
+                    鐢熸垚鍋ュ悍灏忕粨
                   </button>
                 </div>
               </div>
@@ -1078,9 +1059,9 @@ export default function App() {
             {messages.map((message) => (
               <article className={`message ${message.role}`} key={message.id}>
                 <div className="message-header">
-                  <span className="message-role">{message.role === "assistant" ? "医疗助手" : "你"}</span>
+                  <span className="message-role">{message.role === "assistant" ? "鍖荤枟鍔╂墜" : "浣?}</span>
                   <div className="message-header-meta">
-                    {message.cacheHit ? <span className="message-badge cache-hit">命中缓存</span> : null}
+                    {message.cacheHit ? <span className="message-badge cache-hit">鍛戒腑缂撳瓨</span> : null}
                     {message.createdAt ? <span className="message-time">{formatRelativeTime(message.createdAt)}</span> : null}
                   </div>
                 </div>
@@ -1088,7 +1069,7 @@ export default function App() {
                 {message.cacheHit ? (
                   <div className="cache-hit-banner" aria-live="polite">
                     <span className="cache-hit-icon" aria-hidden="true" />
-                    <span>这条回答直接复用了历史结果，因此返回会更快。</span>
+                    <span>杩欐潯鍥炵瓟鐩存帴澶嶇敤浜嗗巻鍙茬粨鏋滐紝鍥犳杩斿洖浼氭洿蹇€?/span>
                   </div>
                 ) : null}
 
@@ -1099,7 +1080,7 @@ export default function App() {
                       {message.streaming ? (
                         <div className="typing-line" aria-live="polite">
                           <span className="typing-cursor" aria-hidden="true" />
-                          <span className="typing-text">正在生成</span>
+                          <span className="typing-text">姝ｅ湪鐢熸垚</span>
                         </div>
                       ) : null}
                     </div>
@@ -1118,11 +1099,11 @@ export default function App() {
                 {message.meta ? (
                   <div className="message-footer">
                     <div className="chip-row">
-                      <span className="meta-chip">意图：{intentText(message.meta.intent)}</span>
-                      <span className="meta-chip">安全级别：{safetyText(message.meta.safety_level)}</span>
+                      <span className="meta-chip">鎰忓浘锛歿intentText(message.meta.intent)}</span>
+                      <span className="meta-chip">瀹夊叏绾у埆锛歿safetyText(message.meta.safety_level)}</span>
                       {message.meta.used_tools.map((tool) => (
                         <span className="meta-chip" key={`${message.id}-${tool}`}>
-                          工具：{tool}
+                          宸ュ叿锛歿tool}
                         </span>
                       ))}
                     </div>
@@ -1145,7 +1126,7 @@ export default function App() {
 
                     {message.meta.follow_up_questions.length > 0 ? (
                       <div className="follow-up-block">
-                        <strong>建议继续追问</strong>
+                        <strong>寤鸿缁х画杩介棶</strong>
                         <ul className="message-list">
                           {message.meta.follow_up_questions.map((item, index) => (
                             <li key={`${message.id}-follow-up-${index}`}>{item}</li>
@@ -1156,7 +1137,7 @@ export default function App() {
 
                     {message.meta.debug ? (
                       <details className="debug-panel">
-                        <summary>调试信息</summary>
+                        <summary>璋冭瘯淇℃伅</summary>
                         <div className="debug-grid">
                           <section className="debug-section">
                             <h6>used_tools</h6>
@@ -1217,7 +1198,7 @@ export default function App() {
                 ) : message.citations && message.citations.length > 0 ? (
                   <div className="message-footer">
                     <div className="chip-row">
-                      {message.intent ? <span className="meta-chip">意图：{intentText(message.intent)}</span> : null}
+                      {message.intent ? <span className="meta-chip">鎰忓浘锛歿intentText(message.intent)}</span> : null}
                       {message.citations.map((citation) =>
                         citation.url ? (
                           <a className="source-chip" key={`${message.id}-${citation.doc_id}`} href={citation.url} target="_blank" rel="noreferrer">
@@ -1237,14 +1218,13 @@ export default function App() {
           </div>
 
           <div className={`assistant-context ${hasConversation ? "compact" : ""}`}>
-            {/* 对话阶段默认只保留摘要条，减少上下文卡片对聊天区高度的占用。 */}
             <section className={`compact-panel summary-strip ${reportContextExpanded ? "expanded" : "collapsed"}`}>
               <div className="compact-panel-head">
                 <div>
                   <p className="section-label">Report</p>
-                  <h3>报告上下文</h3>
+                  <h3>鎶ュ憡涓婁笅鏂?/h3>
                 </div>
-                <span className={`status-pill tone-${reportStateTone}`}>{report ? reportStatusText(report.parse_status) : "未上传"}</span>
+                <span className={`status-pill tone-${reportStateTone}`}>{report ? reportStatusText(report.parse_status) : "鏈笂浼?}</span>
               </div>
               <button
                 className="compact-panel-summary"
@@ -1253,9 +1233,7 @@ export default function App() {
                 aria-expanded={reportContextExpanded}
               >
                 <span>{reportSummaryLine}</span>
-                <span className="summary-strip-hint">
-                  {reportContextExpanded ? "\u70B9\u51FB\u6536\u8D77" : "\u70B9\u51FB\u5C55\u5F00"}
-                </span>
+                <span className="summary-strip-hint">{reportContextExpanded ? "\u70B9\u51FB\u6536\u8D77" : "\u70B9\u51FB\u5C55\u5F00"}</span>
               </button>
               {report ? (
                 <>
@@ -1265,12 +1243,12 @@ export default function App() {
                   </div>
                   <div className="compact-metrics">
                     <span className="context-pill">{report.file_name}</span>
-                    <span className="context-pill">异常 {abnormalCount}</span>
-                    <span className="context-pill">提示 {warningCount}</span>
+                    <span className="context-pill">寮傚父 {abnormalCount}</span>
+                    <span className="context-pill">鎻愮ず {warningCount}</span>
                   </div>
                 </>
               ) : (
-                <p className="compact-panel-text">上传体检报告后，后续追问和小结会自动沿用当前报告上下文。</p>
+                <p className="compact-panel-text">涓婁紶浣撴鎶ュ憡鍚庯紝鍚庣画杩介棶鍜屽皬缁撲細鑷姩娌跨敤褰撳墠鎶ュ憡涓婁笅鏂囥€?/p>
               )}
             </section>
 
@@ -1278,9 +1256,9 @@ export default function App() {
               <div className="compact-panel-head">
                 <div>
                   <p className="section-label">Summary</p>
-                  <h3>健康小结</h3>
+                  <h3>鍋ュ悍灏忕粨</h3>
                 </div>
-                <span className="status-pill tone-ready">{summaryHistory.length} 份</span>
+                <span className="status-pill tone-ready">{summaryHistory.length} 浠?/span>
               </div>
               <button
                 className="compact-panel-summary"
@@ -1289,19 +1267,17 @@ export default function App() {
                 aria-expanded={summaryContextExpanded}
               >
                 <span>{summarySummaryLine}</span>
-                <span className="summary-strip-hint">
-                  {summaryContextExpanded ? "\u70B9\u51FB\u6536\u8D77" : "\u70B9\u51FB\u5C55\u5F00"}
-                </span>
+                <span className="summary-strip-hint">{summaryContextExpanded ? "\u70B9\u51FB\u6536\u8D77" : "\u70B9\u51FB\u5C55\u5F00"}</span>
               </button>
               <p className="compact-panel-text">
                 {summaryHistory.length > 0
-                  ? `最新版本生成于 ${formatRelativeTime(latestSummary?.created_at)}。`
-                  : "生成健康小结后，可在这里快速预览最新版本并下载 PDF。"}
+                  ? `鏈€鏂扮増鏈敓鎴愪簬 ${formatRelativeTime(latestSummary?.created_at)}銆俙
+                  : "鐢熸垚鍋ュ悍灏忕粨鍚庯紝鍙湪杩欓噷蹇€熼瑙堟渶鏂扮増鏈苟涓嬭浇 PDF銆?}
               </p>
               <div className="compact-metrics">
-                <span className="context-pill">{latestSummary ? formatSummaryLabel(latestSummary.created_at, 0) : "尚未生成"}</span>
+                <span className="context-pill">{latestSummary ? formatSummaryLabel(latestSummary.created_at, 0) : "灏氭湭鐢熸垚"}</span>
                 <button className="secondary-button" type="button" onClick={() => setSummaryOpen(true)} disabled={summaryHistory.length === 0}>
-                  查看历史
+                  鏌ョ湅鍘嗗彶
                 </button>
               </div>
             </section>
@@ -1309,7 +1285,7 @@ export default function App() {
 
           <form className={`composer-shell ${hasConversation ? "compact" : ""}`} onSubmit={handleChatSubmit}>
             <label className="composer-label" htmlFor="composer-input">
-              输入问题
+              杈撳叆闂
             </label>
 
             <textarea
@@ -1330,19 +1306,19 @@ export default function App() {
                   onChange={handleReportFileChange}
                 />
                 <button className="secondary-button" type="button" onClick={triggerReportUpload} disabled={!activeSessionId || interactionLocked}>
-                  {report ? "更换体检报告" : "上传体检报告"}
+                  {report ? "鏇存崲浣撴鎶ュ憡" : "涓婁紶浣撴鎶ュ憡"}
                 </button>
                 <button className="secondary-button" type="button" onClick={handleGenerateSummary} disabled={interactionLocked || !report || !reportReady}>
-                  {busy === "summary" ? "生成中..." : "生成健康小结"}
+                  {busy === "summary" ? "鐢熸垚涓?.." : "鐢熸垚鍋ュ悍灏忕粨"}
                 </button>
               </div>
 
               <div className="composer-toolbar-right">
                 <button className="secondary-button" type="button" onClick={() => setSummaryOpen(true)} disabled={summaryHistory.length === 0}>
-                  查看小结
+                  鏌ョ湅灏忕粨
                 </button>
                 <button className="primary-button" type="submit" disabled={interactionLocked || (!reportReady && report !== null)}>
-                  {busy === "chat" ? "处理中..." : "发送"}
+                  {busy === "chat" ? "澶勭悊涓?.." : "鍙戦€?}
                 </button>
               </div>
             </div>
@@ -1356,22 +1332,22 @@ export default function App() {
             <div className="summary-modal-header">
               <div>
                 <p className="eyebrow">Summary Archive</p>
-                <h3>健康小结</h3>
+                <h3>鍋ュ悍灏忕粨</h3>
               </div>
               <button className="text-button subtle" type="button" onClick={() => setSummaryOpen(false)}>
-                关闭
+                鍏抽棴
               </button>
             </div>
 
             <div className="summary-modal-content">
               <aside className="summary-history">
                 <div className="summary-history-header">
-                  <strong>历史版本</strong>
-                  <span>{summaryHistory.length} 份</span>
+                  <strong>鍘嗗彶鐗堟湰</strong>
+                  <span>{summaryHistory.length} 浠?/span>
                 </div>
 
                 {summaryHistory.length === 0 ? (
-                  <div className="summary-history-empty">当前会话还没有生成过健康小结。</div>
+                  <div className="summary-history-empty">褰撳墠浼氳瘽杩樻病鏈夌敓鎴愯繃鍋ュ悍灏忕粨銆?/div>
                 ) : (
                   <div className="summary-history-list">
                     {summaryHistory.map((item, index) => {
@@ -1396,12 +1372,12 @@ export default function App() {
                 {selectedSummary ? (
                   <>
                     <div className="summary-preview-meta">
-                      <span className="status-pill tone-ready">生成时间：{formatRelativeTime(selectedSummary.created_at)}</span>
+                      <span className="status-pill tone-ready">鐢熸垚鏃堕棿锛歿formatRelativeTime(selectedSummary.created_at)}</span>
                     </div>
                     <article className="markdown-preview">{renderMessageContent(selectedSummary.markdown)}</article>
                   </>
                 ) : (
-                  <div className="summary-history-empty">请选择一份健康小结进行预览。</div>
+                  <div className="summary-history-empty">璇烽€夋嫨涓€浠藉仴搴峰皬缁撹繘琛岄瑙堛€?/div>
                 )}
               </section>
             </div>
@@ -1414,7 +1390,7 @@ export default function App() {
                   target="_blank"
                   rel="noreferrer"
                 >
-                  下载 PDF
+                  涓嬭浇 PDF
                 </a>
               ) : null}
             </div>
@@ -1428,34 +1404,34 @@ export default function App() {
             className="trace-drawer"
             role="dialog"
             aria-modal="true"
-            aria-label="Agent 轨迹"
+            aria-label="Agent 杞ㄨ抗"
             onClick={(event) => event.stopPropagation()}
           >
             <header className="trace-drawer-header">
               <div>
                 <p className="section-label">Agent Trace</p>
-                <h3>会话运行轨迹</h3>
+                <h3>浼氳瘽杩愯杞ㄨ抗</h3>
               </div>
               <button className="secondary-button" type="button" onClick={() => setTraceOpen(false)}>
-                关闭
+                鍏抽棴
               </button>
             </header>
 
             <div className="trace-drawer-body">
               <section className="trace-run-list">
                 <div className="trace-panel-head">
-                  <h4>最近运行</h4>
+                  <h4>鏈€杩戣繍琛?/h4>
                   <button
                     className="link-button"
                     type="button"
                     onClick={() => activeSessionId && void refreshAgentRuns(activeSessionId, selectedRunId)}
                     disabled={!activeSessionId || loadingRuns}
                   >
-                    刷新
+                    鍒锋柊
                   </button>
                 </div>
-                {loadingRuns ? <p className="muted">正在加载运行记录...</p> : null}
-                {!loadingRuns && agentRuns.length === 0 ? <p className="muted">当前会话还没有可查看的运行轨迹。</p> : null}
+                {loadingRuns ? <p className="muted">姝ｅ湪鍔犺浇杩愯璁板綍...</p> : null}
+                {!loadingRuns && agentRuns.length === 0 ? <p className="muted">褰撳墠浼氳瘽杩樻病鏈夊彲鏌ョ湅鐨勮繍琛岃建杩广€?/p> : null}
                 <div className="trace-run-items">
                   {agentRuns.map((run) => (
                     <button
@@ -1474,7 +1450,7 @@ export default function App() {
                       <p className="trace-run-question">{run.user_message}</p>
                       <div className="trace-run-meta">
                         <span>{formatRelativeTime(run.started_at)}</span>
-                        <span>{run.cache_status === "hit" ? "缓存命中" : "正常执行"}</span>
+                        <span>{run.cache_status === "hit" ? "缂撳瓨鍛戒腑" : "姝ｅ父鎵ц"}</span>
                       </div>
                     </button>
                   ))}
@@ -1482,13 +1458,13 @@ export default function App() {
               </section>
 
               <section className="trace-detail-panel">
-                {loadingRunDetail ? <p className="muted">正在加载轨迹详情...</p> : null}
-                {!loadingRunDetail && !selectedRunDetail ? <p className="muted">请选择一条运行记录查看详情。</p> : null}
+                {loadingRunDetail ? <p className="muted">姝ｅ湪鍔犺浇杞ㄨ抗璇︽儏...</p> : null}
+                {!loadingRunDetail && !selectedRunDetail ? <p className="muted">璇烽€夋嫨涓€鏉¤繍琛岃褰曟煡鐪嬭鎯呫€?/p> : null}
                 {selectedRunDetail ? (
                   <div className="trace-detail-stack">
                     <section className="trace-detail-card">
                       <div className="trace-panel-head">
-                        <h4>任务概览</h4>
+                        <h4>浠诲姟姒傝</h4>
                       </div>
                       <div className="trace-kv-grid">
                         <div>
@@ -1496,15 +1472,15 @@ export default function App() {
                           <strong>{intentText(selectedRunDetail.task_run.intent)}</strong>
                         </div>
                         <div>
-                          <span>状态</span>
+                          <span>鐘舵€?/span>
                           <strong>{runStatusText(selectedRunDetail.task_run.status)}</strong>
                         </div>
                         <div>
-                          <span>缓存</span>
+                          <span>缂撳瓨</span>
                           <strong>{selectedRunDetail.task_run.cache_status}</strong>
                         </div>
                         <div>
-                          <span>响应模式</span>
+                          <span>鍝嶅簲妯″紡</span>
                           <strong>{selectedRunDetail.task_run.response_mode}</strong>
                         </div>
                       </div>
@@ -1514,7 +1490,7 @@ export default function App() {
                     {selectedRunDetail.goal ? (
                       <section className="trace-detail-card">
                         <div className="trace-panel-head">
-                          <h4>长期目标</h4>
+                          <h4>闀挎湡鐩爣</h4>
                         </div>
                         <pre className="debug-pre">{formatDebugValue(selectedRunDetail.goal)}</pre>
                       </section>
@@ -1522,7 +1498,7 @@ export default function App() {
 
                     <section className="trace-detail-card">
                       <div className="trace-panel-head">
-                        <h4>节点轨迹</h4>
+                        <h4>鑺傜偣杞ㄨ抗</h4>
                       </div>
                       <div className="trace-event-list">
                         {selectedRunDetail.trace_events.map((event) => (
@@ -1547,3 +1523,4 @@ export default function App() {
     </main>
   );
 }
+

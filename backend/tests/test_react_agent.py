@@ -2,7 +2,7 @@
 from pathlib import Path
 
 import httpx
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.models.entities import ChatMessage, ChatSession, LabItem, Report
 from app.services.knowledge_service import knowledge_service
@@ -302,6 +302,49 @@ def test_report_follow_up_uses_previous_report_trend() -> None:
     assert "趋势观察" in response.answer
     assert response.debug is not None
     assert response.debug.synthesis
+
+
+def test_stream_report_auto_analysis_does_not_store_fake_user_message() -> None:
+    with make_session() as session:
+        knowledge_service.seed_local_knowledge(session)
+        chat_session = ChatSession(title="auto-report", report_id="report-auto")
+        session.add(chat_session)
+        report = Report(
+            id="report-auto",
+            file_name="report.pdf",
+            file_path="report.pdf",
+            raw_text="总胆固醇 6.00 mmol/L 3.1-5.2",
+            parse_status="parsed",
+        )
+        session.add(report)
+        session.commit()
+        session.refresh(chat_session)
+
+        session.add(
+            LabItem(
+                report_id=report.id,
+                name="总胆固醇",
+                value_raw="6.00",
+                value_num=6.0,
+                unit="mmol/L",
+                reference_range="3.1-5.2",
+                status="high",
+            )
+        )
+        session.commit()
+
+        events = list(
+            react_agent_service.stream_report_auto_analysis(
+                session=session,
+                session_id=chat_session.id,
+                report_id=report.id,
+                output_dir=Path("."),
+            )
+        )
+        messages = session.exec(select(ChatMessage).where(ChatMessage.session_id == chat_session.id)).all()
+
+    assert any(event["event"] == "final" for event in events)
+    assert [message.role for message in messages] == ["assistant"]
 
 
 def test_report_follow_up_planner_can_narrow_focus_items(monkeypatch) -> None:

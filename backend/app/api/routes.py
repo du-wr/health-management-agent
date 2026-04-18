@@ -307,6 +307,30 @@ def chat_stream(request: ChatRequest, session: Session = Depends(get_session)) -
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
+@router.post("/sessions/{session_id}/reports/{report_id}/analysis/stream")
+def stream_report_auto_analysis(
+    session_id: str,
+    report_id: str,
+    session: Session = Depends(get_session),
+) -> StreamingResponse:
+    """报告解析完成后，自动生成一条报告解读。"""
+
+    def event_generator():
+        try:
+            session_service.get_session_entity(session, session_id)
+            for event in react_agent_service.stream_report_auto_analysis(
+                session,
+                session_id=session_id,
+                report_id=report_id,
+                output_dir=settings.output_path,
+            ):
+                yield _format_sse(event["event"], event["data"])
+        except Exception as exc:
+            yield _format_sse("error", {"detail": str(exc)})
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
 @router.post("/summaries/generate", response_model=SummaryArtifact)
 def generate_summary(request: SummaryRequest, session: Session = Depends(get_session)) -> SummaryArtifact:
     """根据报告生成 Markdown 和 PDF 小结。"""
