@@ -102,7 +102,7 @@ data/
 ### 1. 启动后端
 
 ```powershell
-cd D:\35174\Desktop\agent2\backend
+cd \backend
 python -m pip install -e .[dev]
 copy .env.example .env
 uvicorn app.main:app --reload --port 8000
@@ -111,7 +111,7 @@ uvicorn app.main:app --reload --port 8000
 ### 2. 启动前端
 
 ```powershell
-cd D:\35174\Desktop\agent2\frontend
+cd \frontend
 npm install
 npm run dev
 ```
@@ -129,7 +129,7 @@ npm run dev
 如果你不想使用内嵌 worker，也可以单独启动：
 
 ```powershell
-cd D:\35174\Desktop\agent2\backend
+cd \backend
 python -m app.worker
 ```
 
@@ -175,7 +175,7 @@ REDIS_URL=redis://127.0.0.1:6379/0
 首次迁移：
 
 ```powershell
-cd D:\35174\Desktop\agent2\backend
+cd \backend
 python -m alembic -c .\alembic.ini upgrade head
 ```
 
@@ -186,7 +186,7 @@ python -m alembic -c .\alembic.ini upgrade head
 运行 Agent 评测与主链回归：
 
 ```powershell
-cd D:\35174\Desktop\agent2
+cd \agent
 python -m pytest .\backend\tests\test_agent_eval_runner.py
 python -m pytest .\backend\tests\test_report_pipeline_eval.py
 ```
@@ -194,7 +194,7 @@ python -m pytest .\backend\tests\test_report_pipeline_eval.py
 运行核心 Agent 测试：
 
 ```powershell
-cd D:\35174\Desktop\agent2
+cd \agent
 python -m pytest .\backend\tests\test_react_agent.py
 ```
 
